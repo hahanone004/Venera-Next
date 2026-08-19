@@ -23,6 +23,22 @@ void main() {
       expect(names, ['01.jpg', '1.jpg', '2.jpg', '10.jpg', 'page.jpg']);
     });
 
+    test('sorts mixed alphanumeric names in natural order', () {
+      final names = ['Chapter 10', 'Chapter 2', 'Chapter 1', 'Chapter 20'];
+
+      names.sort(compareComicFileNames);
+
+      expect(names, ['Chapter 1', 'Chapter 2', 'Chapter 10', 'Chapter 20']);
+    });
+
+    test('sorts natural order with non-ASCII text around numbers', () {
+      final names = ['第10话', '第2话', '第1话'];
+
+      names.sort(compareComicFileNames);
+
+      expect(names, ['第1话', '第2话', '第10话']);
+    });
+
     test('filters non-images and optionally excludes named covers', () {
       final entries = ['2.jpg', 'metadata.json', 'cover.png', '1.JPG'];
 

@@ -68,22 +68,49 @@ T? findNamedComicCover<T>(
   return null;
 }
 
+/// Compares two file/directory names using natural sort order, so that
+/// numeric runs are compared by value instead of lexically
+/// (e.g. "Chapter 2" sorts before "Chapter 10").
 int compareComicFileNames(String a, String b) {
   final aName = _baseName(a);
   final bName = _baseName(b);
-  final aIndex = int.tryParse(comicFileStem(aName));
-  final bIndex = int.tryParse(comicFileStem(bName));
-  if (aIndex != null && bIndex != null) {
-    final numericComparison = aIndex.compareTo(bIndex);
-    if (numericComparison != 0) return numericComparison;
-  }
-  final insensitiveComparison = aName.toLowerCase().compareTo(
+  final naturalComparison = _naturalCompare(
+    aName.toLowerCase(),
     bName.toLowerCase(),
   );
-  return insensitiveComparison != 0
-      ? insensitiveComparison
-      : aName.compareTo(bName);
+  return naturalComparison != 0 ? naturalComparison : aName.compareTo(bName);
 }
+
+int _naturalCompare(String a, String b) {
+  var i = 0;
+  var j = 0;
+  while (i < a.length && j < b.length) {
+    if (_isDigit(a.codeUnitAt(i)) && _isDigit(b.codeUnitAt(j))) {
+      var iEnd = i;
+      while (iEnd < a.length && _isDigit(a.codeUnitAt(iEnd))) {
+        iEnd++;
+      }
+      var jEnd = j;
+      while (jEnd < b.length && _isDigit(b.codeUnitAt(jEnd))) {
+        jEnd++;
+      }
+      final numComparison = BigInt.parse(
+        a.substring(i, iEnd),
+      ).compareTo(BigInt.parse(b.substring(j, jEnd)));
+      if (numComparison != 0) return numComparison;
+      i = iEnd;
+      j = jEnd;
+    } else {
+      final charComparison = a[i].compareTo(b[j]);
+      if (charComparison != 0) return charComparison;
+      i++;
+      j++;
+    }
+  }
+  return (a.length - i).compareTo(b.length - j);
+}
+
+bool _isDigit(int codeUnit) => codeUnit >= 0x30 && codeUnit <= 0x39;
 
 String _baseName(String name) {
   final slash = name.lastIndexOf('/');
