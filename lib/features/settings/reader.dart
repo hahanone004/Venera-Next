@@ -471,6 +471,25 @@ class _ReaderSettingsState extends State<ReaderSettings> {
             useDeviceSpecificSettings: useDeviceSpecificSettings,
           ),
           child: SwitchSetting(
+            title: 'Crop whitespace margins'.tl,
+            subtitle:
+                'Only applies to Continuous and Waterfall (Top to Bottom) modes'
+                    .tl,
+            settingKey: 'cropWhitespace',
+            onChanged: () {
+              widget.onChanged?.call('cropWhitespace');
+            },
+            comicId: isEnabledSpecificSettings ? widget.comicId : null,
+            comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
+            useDeviceSettings: useDeviceSpecificSettings,
+          ),
+        ),
+        SliverAnimatedVisibility(
+          visible: _isVerticalFlowMode(
+            isEnabledSpecificSettings: isEnabledSpecificSettings,
+            useDeviceSpecificSettings: useDeviceSpecificSettings,
+          ),
+          child: SwitchSetting(
             title: 'Split dual pages'.tl,
             subtitle:
                 'Only applies to Continuous and Waterfall (Top to Bottom) modes'

@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -31,6 +33,7 @@ class ComicImage extends StatefulWidget {
     this.isAntiAlias = false,
     this.splitWideImage = false,
     this.splitWideImageInvert = false,
+    this.cropWhitespace = false,
     Map<String, String>? headers,
     int? cacheWidth,
     int? cacheHeight,
@@ -76,6 +79,10 @@ class ComicImage extends StatefulWidget {
 
   final bool splitWideImageInvert;
 
+  /// Detects and trims blank margins at the top/bottom of the decoded image,
+  /// so consecutive images in continuous scroll modes pack more tightly.
+  final bool cropWhitespace;
+
   final void Function(State<ComicImage> state)? onInit;
 
   final void Function(State<ComicImage> state)? onDispose;
@@ -110,6 +117,65 @@ List<Rect> splitWideImageSourceRects(Size imageSize, {required bool invert}) {
   return invert ? [left, right] : [right, left];
 }
 
+/// A row is considered blank when every sampled pixel's luma stays within
+/// this distance of the row's first sampled pixel, i.e. the row is close to
+/// a single flat color (typically the white/black margin around scanned
+/// pages).
+const _kWhitespaceRowLumaTolerance = 12;
+
+/// Caps how much can be trimmed from a single edge, so a genuinely blank
+/// full-page image (e.g. a section break) can't collapse to near nothing.
+const _kMaxWhitespaceTrimRatio = 0.4;
+
+/// Reads the top/bottom blank margins out of decoded RGBA [pixels] and
+/// returns how many pixel rows to trim from each edge. Pure pixel-math, kept
+/// separate from [detectWhitespaceMargins] so it can be unit tested without
+/// decoding a real [ui.Image].
+@visibleForTesting
+EdgeInsets computeWhitespaceMargins(ByteData pixels, int width, int height) {
+  if (width <= 0 || height <= 0) return EdgeInsets.zero;
+
+  final sampleStep = math.max(1, width ~/ 64);
+
+  bool isBlankRow(int row) {
+    final rowStart = row * width * 4;
+    int? referenceLuma;
+    for (var col = 0; col < width; col += sampleStep) {
+      final offset = rowStart + col * 4;
+      final luma =
+          (pixels.getUint8(offset) * 299 +
+              pixels.getUint8(offset + 1) * 587 +
+              pixels.getUint8(offset + 2) * 114) ~/
+          1000;
+      referenceLuma ??= luma;
+      if ((luma - referenceLuma).abs() > _kWhitespaceRowLumaTolerance) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  final maxTrim = (height * _kMaxWhitespaceTrimRatio).floor();
+
+  var top = 0;
+  while (top < maxTrim && isBlankRow(top)) {
+    top++;
+  }
+  var bottom = 0;
+  while (bottom < maxTrim && isBlankRow(height - 1 - bottom)) {
+    bottom++;
+  }
+  return EdgeInsets.only(top: top.toDouble(), bottom: bottom.toDouble());
+}
+
+/// Decodes [image]'s pixels off the widget tree to find its blank top/bottom
+/// margins. Runs once per image; callers should cache the result.
+Future<EdgeInsets> detectWhitespaceMargins(ui.Image image) async {
+  final pixels = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+  if (pixels == null) return EdgeInsets.zero;
+  return computeWhitespaceMargins(pixels, image.width, image.height);
+}
+
 class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
   ImageStream? _imageStream;
   ImageInfo? _imageInfo;
@@ -124,7 +190,15 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
 
   static final Map<int, Size> _cache = {};
 
-  static clear() => _cache.clear();
+  static final Map<int, EdgeInsets> _whitespaceMarginCache = {};
+
+  static final Set<int> _whitespaceMarginPending = {};
+
+  static clear() {
+    _cache.clear();
+    _whitespaceMarginCache.clear();
+    _whitespaceMarginPending.clear();
+  }
 
   @override
   void initState() {
@@ -238,6 +312,22 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
       _lastException = null;
       _frameNumber = _frameNumber == null ? 0 : _frameNumber! + 1;
       _wasSynchronouslyLoaded = _wasSynchronouslyLoaded | synchronousCall;
+    });
+    _maybeDetectWhitespaceMargins(imageInfo.image);
+  }
+
+  void _maybeDetectWhitespaceMargins(ui.Image image) {
+    if (!widget.cropWhitespace) return;
+    final key = widget.image.hashCode;
+    if (_whitespaceMarginCache.containsKey(key) ||
+        _whitespaceMarginPending.contains(key)) {
+      return;
+    }
+    _whitespaceMarginPending.add(key);
+    detectWhitespaceMargins(image).then((margins) {
+      _whitespaceMarginPending.remove(key);
+      _whitespaceMarginCache[key] = margins;
+      if (mounted) setState(() {});
     });
   }
 
@@ -385,9 +475,22 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
 
         Size? cacheSize = _cache[widget.image.hashCode];
         if (cacheSize != null) {
-          final displaySize = widget.splitWideImage
-              ? splitWideImageDisplaySize(cacheSize)
-              : cacheSize;
+          final margins = widget.cropWhitespace
+              ? _whitespaceMarginCache[widget.image.hashCode]
+              : null;
+          // Cropping wins over the dual-page split: both reshape the same
+          // display size and combining them isn't a supported combination.
+          Size displaySize;
+          if (margins != null && (margins.top > 0 || margins.bottom > 0)) {
+            displaySize = Size(
+              cacheSize.width,
+              cacheSize.height - margins.top - margins.bottom,
+            );
+          } else if (widget.splitWideImage) {
+            displaySize = splitWideImageDisplaySize(cacheSize);
+          } else {
+            displaySize = cacheSize;
+          }
           if (width == double.infinity) {
             width = constrains.maxWidth;
             height = width * displaySize.height / displaySize.width;
@@ -410,47 +513,74 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
             _imageInfo!.image.width.toDouble(),
             _imageInfo!.image.height.toDouble(),
           );
+          final margins = widget.cropWhitespace
+              ? _whitespaceMarginCache[widget.image.hashCode]
+              : null;
+          final hasCrop =
+              margins != null && (margins.top > 0 || margins.bottom > 0);
           final shouldSplit =
-              widget.splitWideImage && shouldSplitWideImage(imageSize);
+              !hasCrop &&
+              widget.splitWideImage &&
+              shouldSplitWideImage(imageSize);
           // build image
-          Widget result = shouldSplit
-              ? _SplitWideImage(
-                  image: _imageInfo!.image,
-                  width: width,
-                  height: height,
-                  color: widget.color,
-                  opacity: widget.opacity,
-                  colorBlendMode: widget.colorBlendMode,
-                  fit: widget.fit,
-                  alignment: widget.alignment,
-                  matchTextDirection: widget.matchTextDirection,
-                  invertColors: _invertColors,
-                  isAntiAlias: widget.isAntiAlias,
-                  filterQuality: widget.filterQuality,
-                  splitInvert: widget.splitWideImageInvert,
-                )
-              : RawImage(
-                  // Do not clone the image, because RawImage is a stateless wrapper.
-                  // The image will be disposed by this state object when it is not needed
-                  // anymore, such as when it is unmounted or when the image stream pushes
-                  // a new image.
-                  image: _imageInfo?.image,
-                  debugImageLabel: _imageInfo?.debugLabel,
-                  width: width,
-                  height: height,
-                  scale: _imageInfo?.scale ?? 1.0,
-                  color: widget.color,
-                  opacity: widget.opacity,
-                  colorBlendMode: widget.colorBlendMode,
-                  fit: widget.fit,
-                  alignment: widget.alignment,
-                  repeat: widget.repeat,
-                  centerSlice: widget.centerSlice,
-                  matchTextDirection: widget.matchTextDirection,
-                  invertColors: _invertColors,
-                  isAntiAlias: widget.isAntiAlias,
-                  filterQuality: widget.filterQuality,
-                );
+          Widget result;
+          if (margins != null && hasCrop) {
+            result = _CroppedImage(
+              image: _imageInfo!.image,
+              width: width,
+              height: height,
+              topInset: margins.top,
+              bottomInset: margins.bottom,
+              color: widget.color,
+              opacity: widget.opacity,
+              colorBlendMode: widget.colorBlendMode,
+              fit: widget.fit,
+              alignment: widget.alignment,
+              matchTextDirection: widget.matchTextDirection,
+              invertColors: _invertColors,
+              isAntiAlias: widget.isAntiAlias,
+              filterQuality: widget.filterQuality,
+            );
+          } else if (shouldSplit) {
+            result = _SplitWideImage(
+              image: _imageInfo!.image,
+              width: width,
+              height: height,
+              color: widget.color,
+              opacity: widget.opacity,
+              colorBlendMode: widget.colorBlendMode,
+              fit: widget.fit,
+              alignment: widget.alignment,
+              matchTextDirection: widget.matchTextDirection,
+              invertColors: _invertColors,
+              isAntiAlias: widget.isAntiAlias,
+              filterQuality: widget.filterQuality,
+              splitInvert: widget.splitWideImageInvert,
+            );
+          } else {
+            result = RawImage(
+              // Do not clone the image, because RawImage is a stateless wrapper.
+              // The image will be disposed by this state object when it is not needed
+              // anymore, such as when it is unmounted or when the image stream pushes
+              // a new image.
+              image: _imageInfo?.image,
+              debugImageLabel: _imageInfo?.debugLabel,
+              width: width,
+              height: height,
+              scale: _imageInfo?.scale ?? 1.0,
+              color: widget.color,
+              opacity: widget.opacity,
+              colorBlendMode: widget.colorBlendMode,
+              fit: widget.fit,
+              alignment: widget.alignment,
+              repeat: widget.repeat,
+              centerSlice: widget.centerSlice,
+              matchTextDirection: widget.matchTextDirection,
+              invertColors: _invertColors,
+              isAntiAlias: widget.isAntiAlias,
+              filterQuality: widget.filterQuality,
+            );
+          }
 
           if (!widget.excludeFromSemantics) {
             result = Semantics(
@@ -678,5 +808,167 @@ class _SplitWideImagePainter extends CustomPainter {
         oldDelegate.isAntiAlias != isAntiAlias ||
         oldDelegate.filterQuality != filterQuality ||
         oldDelegate.splitInvert != splitInvert;
+  }
+}
+
+class _CroppedImage extends StatelessWidget {
+  const _CroppedImage({
+    required this.image,
+    required this.width,
+    required this.height,
+    required this.topInset,
+    required this.bottomInset,
+    required this.color,
+    required this.opacity,
+    required this.colorBlendMode,
+    required this.fit,
+    required this.alignment,
+    required this.matchTextDirection,
+    required this.invertColors,
+    required this.isAntiAlias,
+    required this.filterQuality,
+  });
+
+  final ui.Image image;
+
+  final double? width;
+
+  final double? height;
+
+  final double topInset;
+
+  final double bottomInset;
+
+  final Color? color;
+
+  final Animation<double>? opacity;
+
+  final BlendMode? colorBlendMode;
+
+  final BoxFit? fit;
+
+  final AlignmentGeometry alignment;
+
+  final bool matchTextDirection;
+
+  final bool invertColors;
+
+  final bool isAntiAlias;
+
+  final FilterQuality filterQuality;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget result = CustomPaint(
+      size: Size(
+        width ?? image.width.toDouble(),
+        height ?? (image.height - topInset - bottomInset),
+      ),
+      painter: _CroppedImagePainter(
+        image: image,
+        topInset: topInset,
+        bottomInset: bottomInset,
+        color: color,
+        colorBlendMode: colorBlendMode,
+        fit: fit,
+        alignment: alignment.resolve(Directionality.maybeOf(context)),
+        matchTextDirection: matchTextDirection,
+        textDirection: Directionality.maybeOf(context),
+        invertColors: invertColors,
+        isAntiAlias: isAntiAlias,
+        filterQuality: filterQuality,
+      ),
+    );
+    if (opacity != null) {
+      result = FadeTransition(opacity: opacity!, child: result);
+    }
+    return SizedBox(width: width, height: height, child: result);
+  }
+}
+
+class _CroppedImagePainter extends CustomPainter {
+  const _CroppedImagePainter({
+    required this.image,
+    required this.topInset,
+    required this.bottomInset,
+    required this.color,
+    required this.colorBlendMode,
+    required this.fit,
+    required this.alignment,
+    required this.matchTextDirection,
+    required this.textDirection,
+    required this.invertColors,
+    required this.isAntiAlias,
+    required this.filterQuality,
+  });
+
+  final ui.Image image;
+
+  final double topInset;
+
+  final double bottomInset;
+
+  final Color? color;
+
+  final BlendMode? colorBlendMode;
+
+  final BoxFit? fit;
+
+  final Alignment alignment;
+
+  final bool matchTextDirection;
+
+  final TextDirection? textDirection;
+
+  final bool invertColors;
+
+  final bool isAntiAlias;
+
+  final FilterQuality filterQuality;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty) return;
+
+    final croppedHeight = image.height - topInset - bottomInset;
+    if (croppedHeight <= 0) return;
+
+    final sourceRect = Rect.fromLTWH(
+      0,
+      topInset,
+      image.width.toDouble(),
+      croppedHeight,
+    );
+    final displaySize = Size(image.width.toDouble(), croppedHeight);
+    final fitted = applyBoxFit(fit ?? BoxFit.scaleDown, displaySize, size);
+    final destination = alignment.inscribe(fitted.destination, Offset.zero & size);
+    final paint = Paint()
+      ..isAntiAlias = isAntiAlias
+      ..filterQuality = filterQuality
+      ..invertColors = invertColors;
+    if (color != null) {
+      paint.colorFilter = ColorFilter.mode(
+        color!,
+        colorBlendMode ?? BlendMode.srcIn,
+      );
+    }
+
+    canvas.drawImageRect(image, sourceRect, destination, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _CroppedImagePainter oldDelegate) {
+    return oldDelegate.image != image ||
+        oldDelegate.topInset != topInset ||
+        oldDelegate.bottomInset != bottomInset ||
+        oldDelegate.color != color ||
+        oldDelegate.colorBlendMode != colorBlendMode ||
+        oldDelegate.fit != fit ||
+        oldDelegate.alignment != alignment ||
+        oldDelegate.matchTextDirection != matchTextDirection ||
+        oldDelegate.textDirection != textDirection ||
+        oldDelegate.invertColors != invertColors ||
+        oldDelegate.isAntiAlias != isAntiAlias ||
+        oldDelegate.filterQuality != filterQuality;
   }
 }

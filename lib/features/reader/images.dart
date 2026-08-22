@@ -786,6 +786,15 @@ class ContinuousModeState extends State<_ContinuousMode>
       ) ==
       true;
 
+  bool get _cropWhitespace =>
+      reader.mode.isTopToBottom &&
+      appdata.settings.getReaderSetting(
+            reader.cid,
+            reader.type.sourceKey,
+            'cropWhitespace',
+          ) ==
+          true;
+
   int get _flowImageCount =>
       crossChapter ? _waterfallFlow.imageCount : reader.maxPage;
 
@@ -1326,6 +1335,7 @@ class ContinuousModeState extends State<_ContinuousMode>
           fit: BoxFit.contain,
           splitWideImage: _splitWideImages,
           splitWideImageInvert: _splitWideImagesInvert,
+          cropWhitespace: _cropWhitespace,
           onInit: (state) => imageStates.add(state),
           onDispose: (state) => imageStates.remove(state),
         );

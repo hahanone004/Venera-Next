@@ -417,6 +417,7 @@ class Settings with ChangeNotifier {
         false, // show chapter comments at end of chapter
     'splitDualPage': false,
     'splitDualPageInvert': false,
+    'cropWhitespace': false,
   };
 
   operator [](String key) {
