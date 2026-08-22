@@ -194,6 +194,16 @@ class GalleryModeState extends State<_GalleryMode>
 
   late ReaderState reader;
 
+  bool get _gallerySmartCrop =>
+      (reader.mode == ReaderMode.galleryLeftToRight ||
+          reader.mode == ReaderMode.galleryRightToLeft) &&
+      appdata.settings.getReaderSetting(
+            reader.cid,
+            reader.type.sourceKey,
+            'gallerySmartCrop',
+          ) ==
+          true;
+
   bool get showChapterCommentsAtEnd {
     if (reader.mode != ReaderMode.galleryLeftToRight &&
         reader.mode != ReaderMode.galleryRightToLeft) {
@@ -364,6 +374,28 @@ class GalleryModeState extends State<_GalleryMode>
             photoViewControllers[index] ??= PhotoViewController();
 
             if (reader.imagesPerPage == 1 || pageImages.length == 1) {
+              if (_gallerySmartCrop) {
+                final viewportSize = MediaQuery.of(context).size;
+                // Do not set `filterQuality` here: on a customChild page,
+                // this fork's PhotoView pins zoom scale to 1.0 whenever
+                // filterQuality != none, which silently disables pinch-zoom.
+                return PhotoViewGalleryPageOptions.customChild(
+                  childSize: viewportSize,
+                  controller: photoViewControllers[index],
+                  minScale: PhotoViewComputedScale.contained * 1.0,
+                  maxScale: PhotoViewComputedScale.covered * 10.0,
+                  child: ComicImage(
+                    image: _createImageProviderFromKey(
+                      pageImages[0],
+                      context,
+                      startIndex + 1,
+                    ),
+                    fillViewport: viewportSize,
+                    onInit: (state) => imageStates.add(state),
+                    onDispose: (state) => imageStates.remove(state),
+                  ),
+                );
+              }
               return PhotoViewGalleryPageOptions(
                 filterQuality: FilterQuality.medium,
                 controller: photoViewControllers[index],

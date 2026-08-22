@@ -418,6 +418,7 @@ class Settings with ChangeNotifier {
     'splitDualPage': false,
     'splitDualPageInvert': false,
     'cropWhitespace': false,
+    'gallerySmartCrop': false,
   };
 
   operator [](String key) {
