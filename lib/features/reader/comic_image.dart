@@ -35,7 +35,6 @@ class ComicImage extends StatefulWidget {
     this.splitWideImage = false,
     this.splitWideImageInvert = false,
     this.cropWhitespace = false,
-    this.fillViewport,
     Map<String, String>? headers,
     int? cacheWidth,
     int? cacheHeight,
@@ -87,14 +86,6 @@ class ComicImage extends StatefulWidget {
   /// more tightly.
   final bool cropWhitespace;
 
-  /// When set, ignores [width]/[height]/[fit]/[cropWhitespace]/
-  /// [splitWideImage] and instead scales+crops the image to exactly fill
-  /// this size with no letterboxing (a `BoxFit.cover`-style fit), biased to
-  /// crop into blank margins before real content. Meant for single-page
-  /// gallery mode, where the goal is "no black bars" rather than "show the
-  /// whole page".
-  final Size? fillViewport;
-
   final void Function(State<ComicImage> state)? onInit;
 
   final void Function(State<ComicImage> state)? onDispose;
@@ -134,24 +125,6 @@ List<Rect> splitWideImageSourceRects(Size imageSize, {required bool invert}) {
 /// a single flat color (typically the white/black margin around scanned
 /// pages, or a blank gap between panels).
 const _kWhitespaceRowLumaTolerance = 12;
-
-bool _isRowBlank(ByteData pixels, int width, int row, int sampleStep) {
-  final rowStart = row * width * 4;
-  int? referenceLuma;
-  for (var col = 0; col < width; col += sampleStep) {
-    final offset = rowStart + col * 4;
-    final luma =
-        (pixels.getUint8(offset) * 299 +
-            pixels.getUint8(offset + 1) * 587 +
-            pixels.getUint8(offset + 2) * 114) ~/
-        1000;
-    referenceLuma ??= luma;
-    if ((luma - referenceLuma).abs() > _kWhitespaceRowLumaTolerance) {
-      return false;
-    }
-  }
-  return true;
-}
 
 /// Caps how much can be trimmed from a run of blank rows touching the top or
 /// bottom edge, so a genuinely blank full-page image (e.g. a section break)
@@ -219,8 +192,24 @@ List<ImageContentSegment> computeWhitespaceSegments(
   if (width <= 0 || height <= 0) return const [];
 
   final sampleStep = math.max(1, width ~/ 64);
-  bool isBlankRow(int row) =>
-      _isRowBlank(pixels, width, row, sampleStep);
+
+  bool isBlankRow(int row) {
+    final rowStart = row * width * 4;
+    int? referenceLuma;
+    for (var col = 0; col < width; col += sampleStep) {
+      final offset = rowStart + col * 4;
+      final luma =
+          (pixels.getUint8(offset) * 299 +
+              pixels.getUint8(offset + 1) * 587 +
+              pixels.getUint8(offset + 2) * 114) ~/
+          1000;
+      referenceLuma ??= luma;
+      if ((luma - referenceLuma).abs() > _kWhitespaceRowLumaTolerance) {
+        return false;
+      }
+    }
+    return true;
+  }
 
   // Group rows into alternating blank/content runs.
   final runs = <({int start, int length, bool isBlank})>[];
@@ -297,92 +286,6 @@ double _totalDisplayHeight(List<ImageContentSegment> segments) {
   return total;
 }
 
-/// Finds the (uncapped) blank margin at the very top and bottom edge of the
-/// image, i.e. how many rows are available to crop into before touching
-/// real content. Unlike [computeWhitespaceSegments], this isn't capped: it's
-/// used as a crop *budget*, not a display trim.
-@visibleForTesting
-({int top, int bottom}) computeEdgeMargins(
-  ByteData pixels,
-  int width,
-  int height,
-) {
-  if (width <= 0 || height <= 0) return (top: 0, bottom: 0);
-
-  final sampleStep = math.max(1, width ~/ 64);
-  var top = 0;
-  while (top < height && _isRowBlank(pixels, width, top, sampleStep)) {
-    top++;
-  }
-  var bottom = 0;
-  while (bottom < height - top &&
-      _isRowBlank(pixels, width, height - 1 - bottom, sampleStep)) {
-    bottom++;
-  }
-  return (top: top, bottom: bottom);
-}
-
-/// Decodes [image]'s pixels to find its top/bottom crop budget. Runs once
-/// per image; callers should cache the result.
-Future<({int top, int bottom})> detectEdgeMargins(ui.Image image) async {
-  final pixels = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
-  if (pixels == null) return (top: 0, bottom: 0);
-  return computeEdgeMargins(pixels, image.width, image.height);
-}
-
-/// Computes the source-image rect to draw (stretched to exactly fill
-/// [viewportSize], i.e. a `BoxFit.cover`-style crop with no letterboxing),
-/// biased so the crop eats into [topMargin]/[bottomMargin] blank rows before
-/// it ever cuts into real content. If the image doesn't have enough blank
-/// margin to absorb the required crop, the remaining amount is split evenly
-/// between top and bottom so the crop stays as centered as possible rather
-/// than favoring one edge.
-///
-/// Horizontal overflow (rare for the tall/narrow pages this targets) has no
-/// equivalent "safe" signal to lean on, so it's always split evenly.
-@visibleForTesting
-Rect computeCoverCropRect({
-  required Size imageSize,
-  required Size viewportSize,
-  required int topMargin,
-  required int bottomMargin,
-}) {
-  if (imageSize.width <= 0 ||
-      imageSize.height <= 0 ||
-      viewportSize.width <= 0 ||
-      viewportSize.height <= 0) {
-    return Offset.zero & imageSize;
-  }
-
-  final scale = math.max(
-    viewportSize.width / imageSize.width,
-    viewportSize.height / imageSize.height,
-  );
-  final visibleWidth = math.min(imageSize.width, viewportSize.width / scale);
-  final visibleHeight = math.min(
-    imageSize.height,
-    viewportSize.height / scale,
-  );
-
-  final overflowWidth = imageSize.width - visibleWidth;
-  final overflowHeight = imageSize.height - visibleHeight;
-
-  final left = overflowWidth / 2;
-
-  double top;
-  if (overflowHeight <= 0) {
-    top = 0;
-  } else {
-    final topBudget = math.min(topMargin.toDouble(), overflowHeight);
-    final remainingAfterTop = overflowHeight - topBudget;
-    final bottomBudget = math.min(bottomMargin.toDouble(), remainingAfterTop);
-    final remainder = remainingAfterTop - bottomBudget;
-    top = topBudget + remainder / 2;
-  }
-
-  return Rect.fromLTWH(left, top, visibleWidth, visibleHeight);
-}
-
 class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
   ImageStream? _imageStream;
   ImageInfo? _imageInfo;
@@ -402,16 +305,10 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
 
   static final Set<int> _whitespaceSegmentPending = {};
 
-  static final Map<int, ({int top, int bottom})> _edgeMarginCache = {};
-
-  static final Set<int> _edgeMarginPending = {};
-
   static clear() {
     _cache.clear();
     _whitespaceSegmentCache.clear();
     _whitespaceSegmentPending.clear();
-    _edgeMarginCache.clear();
-    _edgeMarginPending.clear();
   }
 
   @override
@@ -528,7 +425,6 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
       _wasSynchronouslyLoaded = _wasSynchronouslyLoaded | synchronousCall;
     });
     _maybeDetectWhitespaceSegments(imageInfo.image);
-    _maybeDetectEdgeMargins(imageInfo.image);
   }
 
   void _maybeDetectWhitespaceSegments(ui.Image image) {
@@ -542,27 +438,6 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
     detectWhitespaceSegments(image).then((segments) {
       _whitespaceSegmentPending.remove(key);
       _whitespaceSegmentCache[key] = segments;
-      if (mounted) setState(() {});
-    });
-  }
-
-  bool _shouldBuildTrimmedImage() {
-    if (!widget.cropWhitespace || _imageInfo == null) return false;
-    final segments = _whitespaceSegmentCache[widget.image.hashCode];
-    if (segments == null) return false;
-    return _totalDisplayHeight(segments) < _imageInfo!.image.height;
-  }
-
-  void _maybeDetectEdgeMargins(ui.Image image) {
-    if (widget.fillViewport == null) return;
-    final key = widget.image.hashCode;
-    if (_edgeMarginCache.containsKey(key) || _edgeMarginPending.contains(key)) {
-      return;
-    }
-    _edgeMarginPending.add(key);
-    detectEdgeMargins(image).then((margins) {
-      _edgeMarginPending.remove(key);
-      _edgeMarginCache[key] = margins;
       if (mounted) setState(() {});
     });
   }
@@ -709,72 +584,65 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
           );
         }
 
-        if (widget.fillViewport != null) {
-          width = widget.fillViewport!.width;
-          height = widget.fillViewport!.height;
-        } else {
-          Size? cacheSize = _cache[widget.image.hashCode];
-          if (cacheSize != null) {
-            final segments = widget.cropWhitespace
-                ? _whitespaceSegmentCache[widget.image.hashCode]
-                : null;
-            final totalDisplayHeight = segments == null
-                ? null
-                : _totalDisplayHeight(segments);
-            // Cropping wins over the dual-page split: both reshape the same
-            // display size and combining them isn't a supported combination.
-            Size displaySize;
-            if (totalDisplayHeight != null &&
-                totalDisplayHeight < cacheSize.height) {
-              displaySize = Size(cacheSize.width, totalDisplayHeight);
-            } else if (widget.splitWideImage) {
-              displaySize = splitWideImageDisplaySize(cacheSize);
-            } else {
-              displaySize = cacheSize;
-            }
-            if (width == double.infinity) {
-              width = constrains.maxWidth;
-              height = width * displaySize.height / displaySize.width;
-            } else if (height == double.infinity) {
-              height = constrains.maxHeight;
-              width = height * displaySize.width / displaySize.height;
-            }
+        Size? cacheSize = _cache[widget.image.hashCode];
+        if (cacheSize != null) {
+          final segments = widget.cropWhitespace
+              ? _whitespaceSegmentCache[widget.image.hashCode]
+              : null;
+          final totalDisplayHeight = segments == null
+              ? null
+              : _totalDisplayHeight(segments);
+          // Cropping wins over the dual-page split: both reshape the same
+          // display size and combining them isn't a supported combination.
+          Size displaySize;
+          if (totalDisplayHeight != null &&
+              totalDisplayHeight < cacheSize.height) {
+            displaySize = Size(cacheSize.width, totalDisplayHeight);
+          } else if (widget.splitWideImage) {
+            displaySize = splitWideImageDisplaySize(cacheSize);
           } else {
-            if (width == double.infinity) {
-              width = constrains.maxWidth;
-              height = 300;
-            } else if (height == double.infinity) {
-              height = constrains.maxHeight;
-              width = 300;
-            }
+            displaySize = cacheSize;
+          }
+          if (width == double.infinity) {
+            width = constrains.maxWidth;
+            height = width * displaySize.height / displaySize.width;
+          } else if (height == double.infinity) {
+            height = constrains.maxHeight;
+            width = height * displaySize.width / displaySize.height;
+          }
+        } else {
+          if (width == double.infinity) {
+            width = constrains.maxWidth;
+            height = 300;
+          } else if (height == double.infinity) {
+            height = constrains.maxHeight;
+            width = 300;
           }
         }
 
         if (_imageInfo != null) {
+          final imageSize = Size(
+            _imageInfo!.image.width.toDouble(),
+            _imageInfo!.image.height.toDouble(),
+          );
+          final segments = widget.cropWhitespace
+              ? _whitespaceSegmentCache[widget.image.hashCode]
+              : null;
+          final hasCrop =
+              segments != null &&
+              _totalDisplayHeight(segments) < imageSize.height;
+          final shouldSplit =
+              !hasCrop &&
+              widget.splitWideImage &&
+              shouldSplitWideImage(imageSize);
           // build image
           Widget result;
-          if (widget.fillViewport != null) {
-            final margins =
-                _edgeMarginCache[widget.image.hashCode] ??
-                (top: 0, bottom: 0);
-            result = _CoverImage(
-              image: _imageInfo!.image,
-              viewportSize: widget.fillViewport!,
-              topMargin: margins.top,
-              bottomMargin: margins.bottom,
-              color: widget.color,
-              opacity: widget.opacity,
-              colorBlendMode: widget.colorBlendMode,
-              invertColors: _invertColors,
-              isAntiAlias: widget.isAntiAlias,
-              filterQuality: widget.filterQuality,
-            );
-          } else if (_shouldBuildTrimmedImage()) {
+          if (segments != null && hasCrop) {
             result = _TrimmedImage(
               image: _imageInfo!.image,
               width: width,
               height: height,
-              segments: _whitespaceSegmentCache[widget.image.hashCode]!,
+              segments: segments,
               color: widget.color,
               opacity: widget.opacity,
               colorBlendMode: widget.colorBlendMode,
@@ -785,13 +653,7 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
               isAntiAlias: widget.isAntiAlias,
               filterQuality: widget.filterQuality,
             );
-          } else if (widget.splitWideImage &&
-              shouldSplitWideImage(
-                Size(
-                  _imageInfo!.image.width.toDouble(),
-                  _imageInfo!.image.height.toDouble(),
-                ),
-              )) {
+          } else if (shouldSplit) {
             result = _SplitWideImage(
               image: _imageInfo!.image,
               width: width,
@@ -1229,140 +1091,6 @@ class _TrimmedImagePainter extends CustomPainter {
         oldDelegate.alignment != alignment ||
         oldDelegate.matchTextDirection != matchTextDirection ||
         oldDelegate.textDirection != textDirection ||
-        oldDelegate.invertColors != invertColors ||
-        oldDelegate.isAntiAlias != isAntiAlias ||
-        oldDelegate.filterQuality != filterQuality;
-  }
-}
-
-/// Draws [image] scaled+cropped to exactly fill [viewportSize] with no
-/// letterboxing, via [computeCoverCropRect].
-class _CoverImage extends StatelessWidget {
-  const _CoverImage({
-    required this.image,
-    required this.viewportSize,
-    required this.topMargin,
-    required this.bottomMargin,
-    required this.color,
-    required this.opacity,
-    required this.colorBlendMode,
-    required this.invertColors,
-    required this.isAntiAlias,
-    required this.filterQuality,
-  });
-
-  final ui.Image image;
-
-  final Size viewportSize;
-
-  final int topMargin;
-
-  final int bottomMargin;
-
-  final Color? color;
-
-  final Animation<double>? opacity;
-
-  final BlendMode? colorBlendMode;
-
-  final bool invertColors;
-
-  final bool isAntiAlias;
-
-  final FilterQuality filterQuality;
-
-  @override
-  Widget build(BuildContext context) {
-    Widget result = CustomPaint(
-      size: viewportSize,
-      painter: _CoverImagePainter(
-        image: image,
-        viewportSize: viewportSize,
-        topMargin: topMargin,
-        bottomMargin: bottomMargin,
-        color: color,
-        colorBlendMode: colorBlendMode,
-        invertColors: invertColors,
-        isAntiAlias: isAntiAlias,
-        filterQuality: filterQuality,
-      ),
-    );
-    if (opacity != null) {
-      result = FadeTransition(opacity: opacity!, child: result);
-    }
-    return SizedBox(
-      width: viewportSize.width,
-      height: viewportSize.height,
-      child: result,
-    );
-  }
-}
-
-class _CoverImagePainter extends CustomPainter {
-  const _CoverImagePainter({
-    required this.image,
-    required this.viewportSize,
-    required this.topMargin,
-    required this.bottomMargin,
-    required this.color,
-    required this.colorBlendMode,
-    required this.invertColors,
-    required this.isAntiAlias,
-    required this.filterQuality,
-  });
-
-  final ui.Image image;
-
-  final Size viewportSize;
-
-  final int topMargin;
-
-  final int bottomMargin;
-
-  final Color? color;
-
-  final BlendMode? colorBlendMode;
-
-  final bool invertColors;
-
-  final bool isAntiAlias;
-
-  final FilterQuality filterQuality;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (size.isEmpty) return;
-
-    final imageSize = Size(image.width.toDouble(), image.height.toDouble());
-    final sourceRect = computeCoverCropRect(
-      imageSize: imageSize,
-      viewportSize: viewportSize,
-      topMargin: topMargin,
-      bottomMargin: bottomMargin,
-    );
-
-    final paint = Paint()
-      ..isAntiAlias = isAntiAlias
-      ..filterQuality = filterQuality
-      ..invertColors = invertColors;
-    if (color != null) {
-      paint.colorFilter = ColorFilter.mode(
-        color!,
-        colorBlendMode ?? BlendMode.srcIn,
-      );
-    }
-
-    canvas.drawImageRect(image, sourceRect, Offset.zero & size, paint);
-  }
-
-  @override
-  bool shouldRepaint(covariant _CoverImagePainter oldDelegate) {
-    return oldDelegate.image != image ||
-        oldDelegate.viewportSize != viewportSize ||
-        oldDelegate.topMargin != topMargin ||
-        oldDelegate.bottomMargin != bottomMargin ||
-        oldDelegate.color != color ||
-        oldDelegate.colorBlendMode != colorBlendMode ||
         oldDelegate.invertColors != invertColors ||
         oldDelegate.isAntiAlias != isAntiAlias ||
         oldDelegate.filterQuality != filterQuality;

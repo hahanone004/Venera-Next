@@ -1,6 +1,5 @@
 import 'dart:typed_data';
 
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera_next/features/reader/comic_image.dart';
 
@@ -132,96 +131,6 @@ void main() {
 
     test('returns no segments for an empty image', () {
       expect(computeWhitespaceSegments(ByteData(0), 0, 0), isEmpty);
-    });
-  });
-
-  group('edge margin detection (uncapped, for cover-crop budget)', () {
-    test('reports the full blank run length with no cap', () {
-      // height=20 -> the 40% edge-trim cap used by computeWhitespaceSegments
-      // would be floor(20*0.4)=8, but this function must ignore that cap.
-      final pixels = _buildPixels(
-        width: 128,
-        height: 20,
-        blankRows: {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 17, 18, 19},
-      );
-
-      final margins = computeEdgeMargins(pixels, 128, 20);
-
-      expect(margins, (top: 10, bottom: 3));
-    });
-
-    test('treats a fully blank image as all-top margin', () {
-      final pixels = _buildPixels(
-        width: 128,
-        height: 20,
-        blankRows: {for (var i = 0; i < 20; i++) i},
-      );
-
-      expect(computeEdgeMargins(pixels, 128, 20), (top: 20, bottom: 0));
-    });
-
-    test('returns zero margins for an empty image', () {
-      expect(computeEdgeMargins(ByteData(0), 0, 0), (top: 0, bottom: 0));
-    });
-  });
-
-  group('cover crop rect', () {
-    test('crops symmetrically when there is no margin to prefer', () {
-      final rect = computeCoverCropRect(
-        imageSize: const Size(400, 1000),
-        viewportSize: const Size(400, 600),
-        topMargin: 0,
-        bottomMargin: 0,
-      );
-
-      expect(rect, const Rect.fromLTWH(0, 200, 400, 600));
-    });
-
-    test('prefers cropping into the top margin before real content', () {
-      final rect = computeCoverCropRect(
-        imageSize: const Size(400, 1000),
-        viewportSize: const Size(400, 600),
-        topMargin: 500,
-        bottomMargin: 0,
-      );
-
-      // Margin alone covers the whole 400px overflow, so nothing is taken
-      // from the bottom (crop window ends exactly at the source bottom).
-      expect(rect, const Rect.fromLTWH(0, 400, 400, 600));
-    });
-
-    test('uses up both margins, then splits the remainder evenly', () {
-      final rect = computeCoverCropRect(
-        imageSize: const Size(400, 1000),
-        viewportSize: const Size(400, 600),
-        topMargin: 100,
-        bottomMargin: 50,
-      );
-
-      // overflow=400; margins cover 150; remaining 250 split 125/125.
-      expect(rect, const Rect.fromLTWH(0, 225, 400, 600));
-    });
-
-    test('splits horizontal overflow symmetrically (no margin signal)', () {
-      final rect = computeCoverCropRect(
-        imageSize: const Size(1200, 800),
-        viewportSize: const Size(400, 800),
-        topMargin: 0,
-        bottomMargin: 0,
-      );
-
-      expect(rect, const Rect.fromLTWH(400, 0, 400, 800));
-    });
-
-    test('returns the full image when the aspect ratio already matches', () {
-      final rect = computeCoverCropRect(
-        imageSize: const Size(400, 600),
-        viewportSize: const Size(400, 600),
-        topMargin: 0,
-        bottomMargin: 0,
-      );
-
-      expect(rect, const Rect.fromLTWH(0, 0, 400, 600));
     });
   });
 }

@@ -58,19 +58,6 @@ class _ReaderSettingsState extends State<ReaderSettings> {
         readerMode == 'continuousTopToBottom';
   }
 
-  bool _isGallerySinglePageMode({
-    required bool isEnabledSpecificSettings,
-    required bool useDeviceSpecificSettings,
-  }) {
-    final readerMode = _readerSettingValue(
-      'readerMode',
-      isEnabledSpecificSettings: isEnabledSpecificSettings,
-      useDeviceSpecificSettings: useDeviceSpecificSettings,
-    );
-    return readerMode == 'galleryLeftToRight' ||
-        readerMode == 'galleryRightToLeft';
-  }
-
   bool _isChapterCommentsAtEndSupported() {
     String? readerMode;
     bool? showChapterComments;
@@ -478,25 +465,6 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
           useDeviceSettings: useDeviceSpecificSettings,
         ).toSliver(),
-        SliverAnimatedVisibility(
-          visible: _isGallerySinglePageMode(
-            isEnabledSpecificSettings: isEnabledSpecificSettings,
-            useDeviceSpecificSettings: useDeviceSpecificSettings,
-          ),
-          child: SwitchSetting(
-            title: 'Smart crop to fill screen'.tl,
-            subtitle:
-                'Only applies to Gallery (Left to Right / Right to Left) modes'
-                    .tl,
-            settingKey: 'gallerySmartCrop',
-            onChanged: () {
-              widget.onChanged?.call('gallerySmartCrop');
-            },
-            comicId: isEnabledSpecificSettings ? widget.comicId : null,
-            comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
-            useDeviceSettings: useDeviceSpecificSettings,
-          ),
-        ),
         SliverAnimatedVisibility(
           visible: _isVerticalFlowMode(
             isEnabledSpecificSettings: isEnabledSpecificSettings,
