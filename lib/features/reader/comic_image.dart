@@ -35,6 +35,7 @@ class ComicImage extends StatefulWidget {
     this.splitWideImage = false,
     this.splitWideImageInvert = false,
     this.cropWhitespace = false,
+    this.whitespaceLumaTolerance = kDefaultWhitespaceRowLumaTolerance,
     Map<String, String>? headers,
     int? cacheWidth,
     int? cacheHeight,
@@ -86,6 +87,12 @@ class ComicImage extends StatefulWidget {
   /// more tightly.
   final bool cropWhitespace;
 
+  /// How far a sampled pixel's luma may stray from its row's reference
+  /// pixel before the row stops counting as blank. Some sources render
+  /// margins with visible texture/noise/gradient, so this is user-tunable
+  /// rather than a fixed constant. Only used when [cropWhitespace] is true.
+  final int whitespaceLumaTolerance;
+
   final void Function(State<ComicImage> state)? onInit;
 
   final void Function(State<ComicImage> state)? onDispose;
@@ -120,11 +127,13 @@ List<Rect> splitWideImageSourceRects(Size imageSize, {required bool invert}) {
   return invert ? [left, right] : [right, left];
 }
 
-/// A row is considered blank when every sampled pixel's luma stays within
-/// this distance of the row's first sampled pixel, i.e. the row is close to
-/// a single flat color (typically the white/black margin around scanned
-/// pages, or a blank gap between panels).
-const _kWhitespaceRowLumaTolerance = 12;
+/// Default for how far a sampled pixel's luma may stray from a row's first
+/// sampled pixel before the row stops counting as blank (a single flat
+/// color — typically the white/black margin around scanned pages, or a
+/// blank gap between panels). User-adjustable, since some sources render
+/// their margins with enough texture/noise/gradient that a fixed tolerance
+/// can't fit every source equally well.
+const kDefaultWhitespaceRowLumaTolerance = 12;
 
 /// Caps how much can be trimmed from a run of blank rows touching the top or
 /// bottom edge, so a genuinely blank full-page image (e.g. a section break)
@@ -187,8 +196,9 @@ class ImageContentSegment {
 List<ImageContentSegment> computeWhitespaceSegments(
   ByteData pixels,
   int width,
-  int height,
-) {
+  int height, {
+  int lumaTolerance = kDefaultWhitespaceRowLumaTolerance,
+}) {
   if (width <= 0 || height <= 0) return const [];
 
   final sampleStep = math.max(1, width ~/ 64);
@@ -204,7 +214,7 @@ List<ImageContentSegment> computeWhitespaceSegments(
               pixels.getUint8(offset + 2) * 114) ~/
           1000;
       referenceLuma ??= luma;
-      if ((luma - referenceLuma).abs() > _kWhitespaceRowLumaTolerance) {
+      if ((luma - referenceLuma).abs() > lumaTolerance) {
         return false;
       }
     }
@@ -271,11 +281,17 @@ List<ImageContentSegment> computeWhitespaceSegments(
 /// Decodes [image]'s pixels off the widget tree to compute its content
 /// segments. Runs once per image; callers should cache the result.
 Future<List<ImageContentSegment>> detectWhitespaceSegments(
-  ui.Image image,
-) async {
+  ui.Image image, {
+  int lumaTolerance = kDefaultWhitespaceRowLumaTolerance,
+}) async {
   final pixels = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
   if (pixels == null) return const [];
-  return computeWhitespaceSegments(pixels, image.width, image.height);
+  return computeWhitespaceSegments(
+    pixels,
+    image.width,
+    image.height,
+    lumaTolerance: lumaTolerance,
+  );
 }
 
 double _totalDisplayHeight(List<ImageContentSegment> segments) {
@@ -427,15 +443,23 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
     _maybeDetectWhitespaceSegments(imageInfo.image);
   }
 
+  // Keyed on the tolerance too, so changing it invalidates stale cached
+  // segments computed under the old tolerance instead of reusing them.
+  int get _whitespaceCacheKey =>
+      Object.hash(widget.image.hashCode, widget.whitespaceLumaTolerance);
+
   void _maybeDetectWhitespaceSegments(ui.Image image) {
     if (!widget.cropWhitespace) return;
-    final key = widget.image.hashCode;
+    final key = _whitespaceCacheKey;
     if (_whitespaceSegmentCache.containsKey(key) ||
         _whitespaceSegmentPending.contains(key)) {
       return;
     }
     _whitespaceSegmentPending.add(key);
-    detectWhitespaceSegments(image).then((segments) {
+    detectWhitespaceSegments(
+      image,
+      lumaTolerance: widget.whitespaceLumaTolerance,
+    ).then((segments) {
       _whitespaceSegmentPending.remove(key);
       _whitespaceSegmentCache[key] = segments;
       if (mounted) setState(() {});
@@ -587,7 +611,7 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
         Size? cacheSize = _cache[widget.image.hashCode];
         if (cacheSize != null) {
           final segments = widget.cropWhitespace
-              ? _whitespaceSegmentCache[widget.image.hashCode]
+              ? _whitespaceSegmentCache[_whitespaceCacheKey]
               : null;
           final totalDisplayHeight = segments == null
               ? null
@@ -626,7 +650,7 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
             _imageInfo!.image.height.toDouble(),
           );
           final segments = widget.cropWhitespace
-              ? _whitespaceSegmentCache[widget.image.hashCode]
+              ? _whitespaceSegmentCache[_whitespaceCacheKey]
               : null;
           final hasCrop =
               segments != null &&

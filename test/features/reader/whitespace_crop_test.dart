@@ -133,4 +133,70 @@ void main() {
       expect(computeWhitespaceSegments(ByteData(0), 0, 0), isEmpty);
     });
   });
+
+  group('adjustable luma tolerance', () {
+    // Row 5 isn't a pristine flat color: sampled pixels alternate between
+    // luma 200 and 200+18=218, mimicking a textured/noisy "blank" margin
+    // (e.g. a black background with subtle grain) rather than a perfectly
+    // uniform one.
+    ByteData buildNoisyRowPixels({required int width, required int height}) {
+      final bytes = Uint8List(width * height * 4);
+      for (var row = 0; row < height; row++) {
+        for (var col = 0; col < width; col++) {
+          final i = (row * width + col) * 4;
+          final value = row == 5
+              ? (col % 4 < 2 ? 200 : 218)
+              : 255;
+          bytes[i] = value;
+          bytes[i + 1] = value;
+          bytes[i + 2] = value;
+          bytes[i + 3] = 255;
+        }
+      }
+      return ByteData.view(bytes.buffer);
+    }
+
+    test('default tolerance treats the noisy row as content', () {
+      final pixels = buildNoisyRowPixels(width: 128, height: 10);
+
+      final segments = computeWhitespaceSegments(pixels, 128, 10);
+
+      // The noisy row (spread 18) breaks the blank run in two: each half
+      // (length 5 and 4) gets edge-trimmed independently, and the bottom
+      // half's 4 rows are entirely within the trim cap and disappear.
+      expect(segments, [
+        const ImageContentSegment(
+          sourceTop: 0,
+          sourceHeight: 5,
+          displayHeight: 1,
+        ),
+        const ImageContentSegment(
+          sourceTop: 5,
+          sourceHeight: 1,
+          displayHeight: 1,
+        ),
+      ]);
+    });
+
+    test('a looser tolerance folds the same noisy row back into blank', () {
+      final pixels = buildNoisyRowPixels(width: 128, height: 10);
+
+      final segments = computeWhitespaceSegments(
+        pixels,
+        128,
+        10,
+        lumaTolerance: 20,
+      );
+
+      // Now the whole image is one blank run touching both edges:
+      // 10 - floor(10*0.4)*2 = 2 rows remain.
+      expect(segments, [
+        const ImageContentSegment(
+          sourceTop: 0,
+          sourceHeight: 10,
+          displayHeight: 2,
+        ),
+      ]);
+    });
+  });
 }

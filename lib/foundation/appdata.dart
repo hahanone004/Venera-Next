@@ -418,6 +418,7 @@ class Settings with ChangeNotifier {
     'splitDualPage': false,
     'splitDualPageInvert': false,
     'cropWhitespace': false,
+    'whitespaceCropTolerance': 12,
   };
 
   operator [](String key) {

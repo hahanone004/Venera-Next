@@ -477,7 +477,34 @@ class _ReaderSettingsState extends State<ReaderSettings> {
                     .tl,
             settingKey: 'cropWhitespace',
             onChanged: () {
+              setState(() {});
               widget.onChanged?.call('cropWhitespace');
+            },
+            comicId: isEnabledSpecificSettings ? widget.comicId : null,
+            comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
+            useDeviceSettings: useDeviceSpecificSettings,
+          ),
+        ),
+        SliverAnimatedVisibility(
+          visible:
+              _isVerticalFlowMode(
+                isEnabledSpecificSettings: isEnabledSpecificSettings,
+                useDeviceSpecificSettings: useDeviceSpecificSettings,
+              ) &&
+              _readerSettingValue(
+                    'cropWhitespace',
+                    isEnabledSpecificSettings: isEnabledSpecificSettings,
+                    useDeviceSpecificSettings: useDeviceSpecificSettings,
+                  ) ==
+                  true,
+          child: SliderSetting(
+            title: 'Whitespace crop tolerance'.tl,
+            settingsIndex: 'whitespaceCropTolerance',
+            interval: 1,
+            min: 4,
+            max: 40,
+            onChanged: () {
+              widget.onChanged?.call('whitespaceCropTolerance');
             },
             comicId: isEnabledSpecificSettings ? widget.comicId : null,
             comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
