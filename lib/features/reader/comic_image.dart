@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
@@ -79,8 +80,10 @@ class ComicImage extends StatefulWidget {
 
   final bool splitWideImageInvert;
 
-  /// Detects and trims blank margins at the top/bottom of the decoded image,
-  /// so consecutive images in continuous scroll modes pack more tightly.
+  /// Detects blank margins at the top/bottom of the decoded image and trims
+  /// them, and shrinks (without fully removing) oversized blank gaps found
+  /// in the middle, so consecutive images in continuous scroll modes pack
+  /// more tightly.
   final bool cropWhitespace;
 
   final void Function(State<ComicImage> state)? onInit;
@@ -120,20 +123,73 @@ List<Rect> splitWideImageSourceRects(Size imageSize, {required bool invert}) {
 /// A row is considered blank when every sampled pixel's luma stays within
 /// this distance of the row's first sampled pixel, i.e. the row is close to
 /// a single flat color (typically the white/black margin around scanned
-/// pages).
+/// pages, or a blank gap between panels).
 const _kWhitespaceRowLumaTolerance = 12;
 
-/// Caps how much can be trimmed from a single edge, so a genuinely blank
-/// full-page image (e.g. a section break) can't collapse to near nothing.
-const _kMaxWhitespaceTrimRatio = 0.4;
+/// Caps how much can be trimmed from a run of blank rows touching the top or
+/// bottom edge, so a genuinely blank full-page image (e.g. a section break)
+/// can't collapse to near nothing. Expressed relative to the whole image
+/// height so it scales with resolution.
+const _kMaxEdgeTrimRatio = 0.4;
 
-/// Reads the top/bottom blank margins out of decoded RGBA [pixels] and
-/// returns how many pixel rows to trim from each edge. Pure pixel-math, kept
-/// separate from [detectWhitespaceMargins] so it can be unit tested without
-/// decoding a real [ui.Image].
+/// Caps how tall a blank run in the *middle* of the image is allowed to
+/// remain: unlike edge margins (which get removed almost entirely), a big
+/// gap between panels is only shrunk down to this size, never to zero, since
+/// some separation may be intentional. Relative to image width, which is a
+/// more stable proxy for the page's resolution/DPI than an absolute pixel
+/// count.
+const _kMaxInternalGapRatio = 0.06;
+
+/// Floor for [_kMaxInternalGapRatio] so low-resolution images still keep a
+/// sane-looking gap instead of one shrunk to a few pixels.
+const _kMinInternalGapPx = 24;
+
+/// One vertical slice of the source image to draw. [displayHeight] equals
+/// [sourceHeight] for real content and small gaps (drawn 1:1); it is smaller
+/// for oversized blank runs, which get shrunk instead of distorting art.
+@immutable
 @visibleForTesting
-EdgeInsets computeWhitespaceMargins(ByteData pixels, int width, int height) {
-  if (width <= 0 || height <= 0) return EdgeInsets.zero;
+class ImageContentSegment {
+  const ImageContentSegment({
+    required this.sourceTop,
+    required this.sourceHeight,
+    required this.displayHeight,
+  });
+
+  final int sourceTop;
+
+  final int sourceHeight;
+
+  final double displayHeight;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ImageContentSegment &&
+      other.sourceTop == sourceTop &&
+      other.sourceHeight == sourceHeight &&
+      other.displayHeight == displayHeight;
+
+  @override
+  int get hashCode => Object.hash(sourceTop, sourceHeight, displayHeight);
+
+  @override
+  String toString() =>
+      'ImageContentSegment(sourceTop: $sourceTop, sourceHeight: '
+      '$sourceHeight, displayHeight: $displayHeight)';
+}
+
+/// Splits decoded RGBA [pixels] into vertical segments to draw, trimming
+/// blank margins at the top/bottom and shrinking (but not fully removing)
+/// oversized blank gaps in the middle. Pure pixel-math, kept separate from
+/// [detectWhitespaceSegments] so it can be unit tested without decoding a
+/// real [ui.Image].
+@visibleForTesting
+List<ImageContentSegment> computeWhitespaceSegments(
+  ByteData pixels,
+  int width,
+  int height,
+) {
+  if (width <= 0 || height <= 0) return const [];
 
   final sampleStep = math.max(1, width ~/ 64);
 
@@ -155,25 +211,79 @@ EdgeInsets computeWhitespaceMargins(ByteData pixels, int width, int height) {
     return true;
   }
 
-  final maxTrim = (height * _kMaxWhitespaceTrimRatio).floor();
+  // Group rows into alternating blank/content runs.
+  final runs = <({int start, int length, bool isBlank})>[];
+  var runStart = 0;
+  var runIsBlank = isBlankRow(0);
+  for (var row = 1; row < height; row++) {
+    final rowIsBlank = isBlankRow(row);
+    if (rowIsBlank != runIsBlank) {
+      runs.add((start: runStart, length: row - runStart, isBlank: runIsBlank));
+      runStart = row;
+      runIsBlank = rowIsBlank;
+    }
+  }
+  runs.add((start: runStart, length: height - runStart, isBlank: runIsBlank));
 
-  var top = 0;
-  while (top < maxTrim && isBlankRow(top)) {
-    top++;
+  final maxEdgeTrim = (height * _kMaxEdgeTrimRatio).floor();
+  final maxInternalGap = math.max(
+    _kMinInternalGapPx,
+    (width * _kMaxInternalGapRatio).round(),
+  );
+
+  final segments = <ImageContentSegment>[];
+  for (final run in runs) {
+    if (!run.isBlank) {
+      segments.add(
+        ImageContentSegment(
+          sourceTop: run.start,
+          sourceHeight: run.length,
+          displayHeight: run.length.toDouble(),
+        ),
+      );
+      continue;
+    }
+
+    final touchesTop = run.start == 0;
+    final touchesBottom = run.start + run.length == height;
+    double displayHeight;
+    if (touchesTop || touchesBottom) {
+      var trimmed = 0;
+      if (touchesTop) trimmed += maxEdgeTrim;
+      if (touchesBottom) trimmed += maxEdgeTrim;
+      displayHeight = math.max(0, run.length - trimmed).toDouble();
+    } else {
+      displayHeight = math.min(run.length, maxInternalGap).toDouble();
+    }
+    if (displayHeight > 0) {
+      segments.add(
+        ImageContentSegment(
+          sourceTop: run.start,
+          sourceHeight: run.length,
+          displayHeight: displayHeight,
+        ),
+      );
+    }
   }
-  var bottom = 0;
-  while (bottom < maxTrim && isBlankRow(height - 1 - bottom)) {
-    bottom++;
-  }
-  return EdgeInsets.only(top: top.toDouble(), bottom: bottom.toDouble());
+  return segments;
 }
 
-/// Decodes [image]'s pixels off the widget tree to find its blank top/bottom
-/// margins. Runs once per image; callers should cache the result.
-Future<EdgeInsets> detectWhitespaceMargins(ui.Image image) async {
+/// Decodes [image]'s pixels off the widget tree to compute its content
+/// segments. Runs once per image; callers should cache the result.
+Future<List<ImageContentSegment>> detectWhitespaceSegments(
+  ui.Image image,
+) async {
   final pixels = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
-  if (pixels == null) return EdgeInsets.zero;
-  return computeWhitespaceMargins(pixels, image.width, image.height);
+  if (pixels == null) return const [];
+  return computeWhitespaceSegments(pixels, image.width, image.height);
+}
+
+double _totalDisplayHeight(List<ImageContentSegment> segments) {
+  var total = 0.0;
+  for (final segment in segments) {
+    total += segment.displayHeight;
+  }
+  return total;
 }
 
 class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
@@ -190,14 +300,15 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
 
   static final Map<int, Size> _cache = {};
 
-  static final Map<int, EdgeInsets> _whitespaceMarginCache = {};
+  static final Map<int, List<ImageContentSegment>> _whitespaceSegmentCache =
+      {};
 
-  static final Set<int> _whitespaceMarginPending = {};
+  static final Set<int> _whitespaceSegmentPending = {};
 
   static clear() {
     _cache.clear();
-    _whitespaceMarginCache.clear();
-    _whitespaceMarginPending.clear();
+    _whitespaceSegmentCache.clear();
+    _whitespaceSegmentPending.clear();
   }
 
   @override
@@ -313,20 +424,20 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
       _frameNumber = _frameNumber == null ? 0 : _frameNumber! + 1;
       _wasSynchronouslyLoaded = _wasSynchronouslyLoaded | synchronousCall;
     });
-    _maybeDetectWhitespaceMargins(imageInfo.image);
+    _maybeDetectWhitespaceSegments(imageInfo.image);
   }
 
-  void _maybeDetectWhitespaceMargins(ui.Image image) {
+  void _maybeDetectWhitespaceSegments(ui.Image image) {
     if (!widget.cropWhitespace) return;
     final key = widget.image.hashCode;
-    if (_whitespaceMarginCache.containsKey(key) ||
-        _whitespaceMarginPending.contains(key)) {
+    if (_whitespaceSegmentCache.containsKey(key) ||
+        _whitespaceSegmentPending.contains(key)) {
       return;
     }
-    _whitespaceMarginPending.add(key);
-    detectWhitespaceMargins(image).then((margins) {
-      _whitespaceMarginPending.remove(key);
-      _whitespaceMarginCache[key] = margins;
+    _whitespaceSegmentPending.add(key);
+    detectWhitespaceSegments(image).then((segments) {
+      _whitespaceSegmentPending.remove(key);
+      _whitespaceSegmentCache[key] = segments;
       if (mounted) setState(() {});
     });
   }
@@ -475,17 +586,18 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
 
         Size? cacheSize = _cache[widget.image.hashCode];
         if (cacheSize != null) {
-          final margins = widget.cropWhitespace
-              ? _whitespaceMarginCache[widget.image.hashCode]
+          final segments = widget.cropWhitespace
+              ? _whitespaceSegmentCache[widget.image.hashCode]
               : null;
+          final totalDisplayHeight = segments == null
+              ? null
+              : _totalDisplayHeight(segments);
           // Cropping wins over the dual-page split: both reshape the same
           // display size and combining them isn't a supported combination.
           Size displaySize;
-          if (margins != null && (margins.top > 0 || margins.bottom > 0)) {
-            displaySize = Size(
-              cacheSize.width,
-              cacheSize.height - margins.top - margins.bottom,
-            );
+          if (totalDisplayHeight != null &&
+              totalDisplayHeight < cacheSize.height) {
+            displaySize = Size(cacheSize.width, totalDisplayHeight);
           } else if (widget.splitWideImage) {
             displaySize = splitWideImageDisplaySize(cacheSize);
           } else {
@@ -513,24 +625,24 @@ class ComicImageState extends State<ComicImage> with WidgetsBindingObserver {
             _imageInfo!.image.width.toDouble(),
             _imageInfo!.image.height.toDouble(),
           );
-          final margins = widget.cropWhitespace
-              ? _whitespaceMarginCache[widget.image.hashCode]
+          final segments = widget.cropWhitespace
+              ? _whitespaceSegmentCache[widget.image.hashCode]
               : null;
           final hasCrop =
-              margins != null && (margins.top > 0 || margins.bottom > 0);
+              segments != null &&
+              _totalDisplayHeight(segments) < imageSize.height;
           final shouldSplit =
               !hasCrop &&
               widget.splitWideImage &&
               shouldSplitWideImage(imageSize);
           // build image
           Widget result;
-          if (margins != null && hasCrop) {
-            result = _CroppedImage(
+          if (segments != null && hasCrop) {
+            result = _TrimmedImage(
               image: _imageInfo!.image,
               width: width,
               height: height,
-              topInset: margins.top,
-              bottomInset: margins.bottom,
+              segments: segments,
               color: widget.color,
               opacity: widget.opacity,
               colorBlendMode: widget.colorBlendMode,
@@ -811,13 +923,12 @@ class _SplitWideImagePainter extends CustomPainter {
   }
 }
 
-class _CroppedImage extends StatelessWidget {
-  const _CroppedImage({
+class _TrimmedImage extends StatelessWidget {
+  const _TrimmedImage({
     required this.image,
     required this.width,
     required this.height,
-    required this.topInset,
-    required this.bottomInset,
+    required this.segments,
     required this.color,
     required this.opacity,
     required this.colorBlendMode,
@@ -835,9 +946,7 @@ class _CroppedImage extends StatelessWidget {
 
   final double? height;
 
-  final double topInset;
-
-  final double bottomInset;
+  final List<ImageContentSegment> segments;
 
   final Color? color;
 
@@ -862,12 +971,11 @@ class _CroppedImage extends StatelessWidget {
     Widget result = CustomPaint(
       size: Size(
         width ?? image.width.toDouble(),
-        height ?? (image.height - topInset - bottomInset),
+        height ?? _totalDisplayHeight(segments),
       ),
-      painter: _CroppedImagePainter(
+      painter: _TrimmedImagePainter(
         image: image,
-        topInset: topInset,
-        bottomInset: bottomInset,
+        segments: segments,
         color: color,
         colorBlendMode: colorBlendMode,
         fit: fit,
@@ -886,11 +994,10 @@ class _CroppedImage extends StatelessWidget {
   }
 }
 
-class _CroppedImagePainter extends CustomPainter {
-  const _CroppedImagePainter({
+class _TrimmedImagePainter extends CustomPainter {
+  const _TrimmedImagePainter({
     required this.image,
-    required this.topInset,
-    required this.bottomInset,
+    required this.segments,
     required this.color,
     required this.colorBlendMode,
     required this.fit,
@@ -904,9 +1011,7 @@ class _CroppedImagePainter extends CustomPainter {
 
   final ui.Image image;
 
-  final double topInset;
-
-  final double bottomInset;
+  final List<ImageContentSegment> segments;
 
   final Color? color;
 
@@ -928,20 +1033,22 @@ class _CroppedImagePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (size.isEmpty) return;
+    if (size.isEmpty || segments.isEmpty) return;
 
-    final croppedHeight = image.height - topInset - bottomInset;
-    if (croppedHeight <= 0) return;
+    final totalDisplayHeight = _totalDisplayHeight(segments);
+    if (totalDisplayHeight <= 0) return;
 
-    final sourceRect = Rect.fromLTWH(
-      0,
-      topInset,
-      image.width.toDouble(),
-      croppedHeight,
-    );
-    final displaySize = Size(image.width.toDouble(), croppedHeight);
+    final displaySize = Size(image.width.toDouble(), totalDisplayHeight);
     final fitted = applyBoxFit(fit ?? BoxFit.scaleDown, displaySize, size);
-    final destination = alignment.inscribe(fitted.destination, Offset.zero & size);
+    final destination = alignment.inscribe(
+      fitted.destination,
+      Offset.zero & size,
+    );
+    // Both dimensions of `fitted.destination` are scaled from `displaySize`
+    // by the same factor (that's what BoxFit.contain/scaleDown guarantee),
+    // so this one scale applies to every segment's height in turn below.
+    final scale = destination.width / displaySize.width;
+
     final paint = Paint()
       ..isAntiAlias = isAntiAlias
       ..filterQuality = filterQuality
@@ -953,14 +1060,31 @@ class _CroppedImagePainter extends CustomPainter {
       );
     }
 
-    canvas.drawImageRect(image, sourceRect, destination, paint);
+    var destTop = destination.top;
+    for (final segment in segments) {
+      if (segment.displayHeight <= 0) continue;
+      final sourceRect = Rect.fromLTWH(
+        0,
+        segment.sourceTop.toDouble(),
+        image.width.toDouble(),
+        segment.sourceHeight.toDouble(),
+      );
+      final destHeight = segment.displayHeight * scale;
+      final destRect = Rect.fromLTWH(
+        destination.left,
+        destTop,
+        destination.width,
+        destHeight,
+      );
+      canvas.drawImageRect(image, sourceRect, destRect, paint);
+      destTop += destHeight;
+    }
   }
 
   @override
-  bool shouldRepaint(covariant _CroppedImagePainter oldDelegate) {
+  bool shouldRepaint(covariant _TrimmedImagePainter oldDelegate) {
     return oldDelegate.image != image ||
-        oldDelegate.topInset != topInset ||
-        oldDelegate.bottomInset != bottomInset ||
+        !listEquals(oldDelegate.segments, segments) ||
         oldDelegate.color != color ||
         oldDelegate.colorBlendMode != colorBlendMode ||
         oldDelegate.fit != fit ||

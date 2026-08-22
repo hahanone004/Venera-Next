@@ -1,6 +1,5 @@
 import 'dart:typed_data';
 
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera_next/features/reader/comic_image.dart';
 
@@ -18,9 +17,7 @@ ByteData _buildPixels({
       final i = (row * width + col) * 4;
       // Values chosen so that even with the function's column sampling
       // stride, sampled pixels within a "content" row still disagree.
-      final value = isBlank
-          ? 255
-          : (col % 3 == 0 ? 0 : 255);
+      final value = isBlank ? 255 : (col % 3 == 0 ? 0 : 255);
       bytes[i] = value;
       bytes[i + 1] = value;
       bytes[i + 2] = value;
@@ -31,30 +28,85 @@ ByteData _buildPixels({
 }
 
 void main() {
-  group('whitespace margin detection', () {
-    test('trims blank rows from the top and bottom only', () {
+  group('whitespace segment detection', () {
+    test('trims blank margins from the top and bottom edges', () {
       final pixels = _buildPixels(
         width: 128,
         height: 20,
         blankRows: {0, 1, 2, 3, 4, 17, 18, 19},
       );
 
-      final margins = computeWhitespaceMargins(pixels, 128, 20);
+      final segments = computeWhitespaceSegments(pixels, 128, 20);
 
-      expect(margins.top, 5);
-      expect(margins.bottom, 3);
+      // The edge margins are fully trimmed (well under the 40% cap), only
+      // the content run in the middle remains.
+      expect(segments, [
+        const ImageContentSegment(
+          sourceTop: 5,
+          sourceHeight: 12,
+          displayHeight: 12,
+        ),
+      ]);
     });
 
-    test('ignores blank rows in the middle of the image', () {
+    test('leaves a small gap in the middle untouched', () {
       final pixels = _buildPixels(
         width: 128,
         height: 20,
         blankRows: {8, 9, 10},
       );
 
-      final margins = computeWhitespaceMargins(pixels, 128, 20);
+      final segments = computeWhitespaceSegments(pixels, 128, 20);
 
-      expect(margins, EdgeInsets.zero);
+      expect(segments, [
+        const ImageContentSegment(
+          sourceTop: 0,
+          sourceHeight: 8,
+          displayHeight: 8,
+        ),
+        const ImageContentSegment(
+          sourceTop: 8,
+          sourceHeight: 3,
+          displayHeight: 3,
+        ),
+        const ImageContentSegment(
+          sourceTop: 11,
+          sourceHeight: 9,
+          displayHeight: 9,
+        ),
+      ]);
+    });
+
+    test('shrinks a large gap in the middle without removing it', () {
+      // width 128 -> max internal gap is round(128 * 0.06) = 8, floored up
+      // to the 24px minimum, so an 80-row gap should be capped at 24.
+      final pixels = _buildPixels(
+        width: 128,
+        height: 90,
+        blankRows: {for (var i = 5; i < 85; i++) i},
+      );
+
+      final segments = computeWhitespaceSegments(pixels, 128, 90);
+
+      expect(segments, [
+        const ImageContentSegment(
+          sourceTop: 0,
+          sourceHeight: 5,
+          displayHeight: 5,
+        ),
+        const ImageContentSegment(
+          sourceTop: 5,
+          sourceHeight: 80,
+          displayHeight: 24,
+        ),
+        const ImageContentSegment(
+          sourceTop: 85,
+          sourceHeight: 5,
+          displayHeight: 5,
+        ),
+      ]);
+      // Shrunk, not eliminated: the gap is still visible between panels.
+      expect(segments[1].displayHeight, greaterThan(0));
     });
 
     test('caps trimming so a fully blank image is not collapsed', () {
@@ -64,16 +116,21 @@ void main() {
         blankRows: {for (var i = 0; i < 20; i++) i},
       );
 
-      final margins = computeWhitespaceMargins(pixels, 128, 20);
+      final segments = computeWhitespaceSegments(pixels, 128, 20);
 
-      expect(margins.top, 8);
-      expect(margins.bottom, 8);
+      // Single run touches both edges, so it's trimmed from both sides:
+      // 20 - floor(20*0.4)*2 = 4 rows remain.
+      expect(segments, [
+        const ImageContentSegment(
+          sourceTop: 0,
+          sourceHeight: 20,
+          displayHeight: 4,
+        ),
+      ]);
     });
 
-    test('returns zero insets for an empty image', () {
-      final pixels = ByteData(0);
-
-      expect(computeWhitespaceMargins(pixels, 0, 0), EdgeInsets.zero);
+    test('returns no segments for an empty image', () {
+      expect(computeWhitespaceSegments(ByteData(0), 0, 0), isEmpty);
     });
   });
 }
