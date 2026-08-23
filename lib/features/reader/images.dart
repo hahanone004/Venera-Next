@@ -17,6 +17,7 @@ import 'package:venera_next/features/reader/chapter_comments.dart';
 import 'package:venera_next/features/reader/comic_image.dart';
 import 'package:venera_next/features/reader/reader_page.dart';
 import 'package:venera_next/features/reader/waterfall_flow.dart';
+import 'package:venera_next/features/webdav_library/webdav_library.dart';
 import 'package:venera_next/foundation/appdata.dart';
 import 'package:venera_next/foundation/cache_manager.dart';
 import 'package:venera_next/foundation/comic_type.dart';
@@ -119,9 +120,27 @@ class ReaderImagesState extends State<ReaderImages> {
             reader.onReaderContentReady();
           });
         });
+        _prefetchNextWebDavArchiveChapter();
       }
     }
     context.readerScaffold.update();
+  }
+
+  /// Starts caching the next chapter's WebDAV archive (cbz/zip/7z/cb7) file
+  /// in the background as soon as the current chapter is done loading, so
+  /// it's already downloaded and extracted by the time the reader gets
+  /// there instead of the user waiting on it mid-read. A no-op for chapters
+  /// that aren't archive files, and for any other source.
+  void _prefetchNextWebDavArchiveChapter() {
+    if (reader.type.sourceKey != WebDavLibrarySource.sourceKey) return;
+    if (reader.chapter >= reader.maxChapter) return;
+    final nextChapterId = reader.widget.chapters?.ids.elementAtOrNull(
+      reader.chapter,
+    );
+    if (nextChapterId == null) return;
+    unawaited(
+      WebDavLibrarySource.loadComicPages(reader.widget.cid, nextChapterId),
+    );
   }
 
   @override
