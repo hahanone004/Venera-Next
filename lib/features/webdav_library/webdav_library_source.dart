@@ -305,6 +305,7 @@ class WebDavLibrarySource {
     _syncRun = null;
     _clearMemoryCaches();
     _cache.resetForTesting();
+    _archiveInFlight.clear();
     syncStatus.value = const WebDavLibrarySyncStatus(
       isSyncing: false,
       lastSuccessfulSync: 0,
@@ -750,7 +751,11 @@ class WebDavLibrarySource {
     if (files.isEmpty) {
       return const Res.error('No images found in the WebDAV archive chapter');
     }
-    unawaited(_evictArchiveCacheExcept(cacheDir.path));
+    // Awaited (not fire-and-forget): this reads App.cachePath fresh, so a
+    // detached sweep left running after this call returns could race a
+    // later call that has since changed it (most visibly in tests, where
+    // each case points App.cachePath at its own temp directory).
+    await _evictArchiveCacheExcept(cacheDir.path);
     return Res(files);
   }
 

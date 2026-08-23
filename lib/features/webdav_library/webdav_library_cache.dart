@@ -313,6 +313,17 @@ class WebDavLibraryCache {
   }
 
   void resetForTesting() {
+    // Wipe the persisted rows before dropping the connection: disposing
+    // and reopening alone reconnects to the same on-disk file (App.dataPath
+    // doesn't necessarily change between calls within a single test), so
+    // previously cached snapshots would otherwise still be found by
+    // find()/all() after "resetting".
+    try {
+      _database.execute('DELETE FROM webdav_library_comics;');
+      _database.execute('DELETE FROM webdav_library_state;');
+    } catch (_) {
+      // Ignore: if the tables can't even be opened, there's nothing to wipe.
+    }
     _db?.dispose();
     _db = null;
     _dbPath = null;

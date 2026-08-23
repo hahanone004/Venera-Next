@@ -276,6 +276,9 @@ void main() {
         '第03卷': '第03卷',
         '第04卷': '第04卷',
         '第05卷': '第05卷',
+        // book.cbz is a single-archive chapter (see the 'archive-file
+        // chapters' group below), not an ignored file.
+        'book.cbz': 'book.cbz',
       });
       expect(ops.readPaths, ['/manga/Cat Eye/', '/manga/Cat Eye/第01卷/']);
     },
