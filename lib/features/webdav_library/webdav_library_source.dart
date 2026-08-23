@@ -1,12 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:venera_next/features/comic_source/comic_source.dart';
 import 'package:venera_next/features/comic_storage/comic_storage.dart';
+import 'package:venera_next/features/local_comics/import_export/import_export.dart';
 import 'package:venera_next/features/webdav_library/webdav_library_cache.dart';
+import 'package:venera_next/foundation/app.dart';
 import 'package:venera_next/foundation/appdata.dart';
 import 'package:venera_next/foundation/extensions.dart';
+import 'package:venera_next/foundation/file_system.dart';
 import 'package:venera_next/foundation/log.dart';
 import 'package:venera_next/foundation/res.dart';
 import 'package:venera_next/foundation/throttled_task_runner.dart';
@@ -118,6 +122,8 @@ abstract class WebDavLibraryOps {
   );
 
   Future<String> readText(WebDavLibraryConfig config, String remotePath);
+
+  Future<List<int>> readBytes(WebDavLibraryConfig config, String remotePath);
 }
 
 class _WebDavLibraryOps implements WebDavLibraryOps {
@@ -158,6 +164,14 @@ class _WebDavLibraryOps implements WebDavLibraryOps {
   Future<String> readText(WebDavLibraryConfig config, String remotePath) async {
     final bytes = await _client(config).read(remotePath);
     return utf8.decode(bytes, allowMalformed: false);
+  }
+
+  @override
+  Future<List<int>> readBytes(
+    WebDavLibraryConfig config,
+    String remotePath,
+  ) async {
+    return await _client(config).read(remotePath);
   }
 }
 
@@ -609,6 +623,20 @@ class WebDavLibrarySource {
     }
     try {
       final comicPath = config.childDirectoryPath(id);
+
+      // Archive-file chapter ids always carry an archive extension, unlike
+      // directory-based ids, so this check is a cheap, purely local way to
+      // decide whether the (network-fetching) snapshot lookup below is
+      // needed at all -- plain directory chapters skip it entirely, exactly
+      // like before this feature existed.
+      if (ep != null && isComicArchiveFileName(ep)) {
+        final snapshot = await _loadSnapshot(config, id);
+        final archiveEntry = snapshot.archiveChapters[ep];
+        if (archiveEntry != null) {
+          return await _loadArchiveChapterPages(config, id, ep, archiveEntry);
+        }
+      }
+
       if (ep != null &&
           ep != rootChapterId &&
           !ep.startsWith(_metadataChapterPrefix)) {
@@ -650,6 +678,142 @@ class WebDavLibrarySource {
       return const Res.error('No images found in the WebDAV chapter');
     } catch (e) {
       return Res.error(e.toString());
+    }
+  }
+
+  /// Downloads and extracts an archive-file chapter into a temporary local
+  /// cache, then returns the extracted pages. Re-visiting an unchanged
+  /// chapter (same remote eTag/modified time) reuses the extraction already
+  /// on disk instead of downloading again; only [_archiveCacheMaxChapters]
+  /// extracted chapters are kept at once, oldest evicted first, since this
+  /// is a scratch cache, not a permanent download.
+  static final _archiveInFlight = <String, Future<Res<List<String>>>>{};
+
+  static Future<Res<List<String>>> _loadArchiveChapterPages(
+    WebDavLibraryConfig config,
+    String comicId,
+    String ep,
+    WebDavLibraryEntry entry,
+  ) {
+    final cacheKey = _archiveCacheKey(config, comicId, ep, entry);
+    final inFlight = _archiveInFlight[cacheKey];
+    if (inFlight != null) return inFlight;
+    final future = _loadArchiveChapterPagesUncached(
+      config,
+      comicId,
+      ep,
+      entry,
+      cacheKey,
+    );
+    _archiveInFlight[cacheKey] = future;
+    return future.whenComplete(() {
+      if (identical(_archiveInFlight[cacheKey], future)) {
+        _archiveInFlight.remove(cacheKey);
+      }
+    });
+  }
+
+  static Future<Res<List<String>>> _loadArchiveChapterPagesUncached(
+    WebDavLibraryConfig config,
+    String comicId,
+    String ep,
+    WebDavLibraryEntry entry,
+    String cacheKey,
+  ) async {
+    final cacheDir = Directory(
+      FilePath.join(_archiveCacheRoot.path, cacheKey),
+    );
+
+    var files = await _readExtractedArchivePages(cacheDir);
+    if (files.isEmpty) {
+      await cacheDir.deleteIfExists(recursive: true);
+      final comicPath = config.childDirectoryPath(comicId);
+      final remotePath = config.childFilePath(comicPath, entry.name);
+      final bytes = await ops.readBytes(config, remotePath);
+      // Named by the cache key (not entry.name) so two concurrent downloads
+      // for different comics/chapters can never collide on the same temp
+      // file path.
+      final download = File(
+        FilePath.join(_archiveCacheRoot.path, '$cacheKey.download'),
+      );
+      await download.create(recursive: true);
+      await download.writeAsBytes(bytes);
+      try {
+        await cacheDir.create(recursive: true);
+        await CBZ.extractArchive(download, cacheDir);
+      } finally {
+        await download.deleteIgnoreError();
+      }
+      files = await _readExtractedArchivePages(cacheDir);
+    }
+
+    if (files.isEmpty) {
+      return const Res.error('No images found in the WebDAV archive chapter');
+    }
+    unawaited(_evictArchiveCacheExcept(cacheDir.path));
+    return Res(files);
+  }
+
+  static const _archiveCacheDirName = 'webdav_cbz';
+  static const _archiveCacheMaxChapters = 5;
+
+  static Directory get _archiveCacheRoot =>
+      Directory(FilePath.join(App.cachePath, _archiveCacheDirName));
+
+  static String _archiveCacheKey(
+    WebDavLibraryConfig config,
+    String comicId,
+    String ep,
+    WebDavLibraryEntry entry,
+  ) {
+    final raw = jsonEncode([
+      config.cacheKey,
+      comicId,
+      ep,
+      entry.eTag,
+      entry.modifiedAt,
+    ]);
+    return md5.convert(utf8.encode(raw)).toString();
+  }
+
+  static Future<List<String>> _readExtractedArchivePages(Directory dir) async {
+    if (!await dir.exists()) return const [];
+    final files = <File>[];
+    await for (final entity in dir.list()) {
+      if (entity is File &&
+          !isIgnoredComicStorageEntry(entity.name) &&
+          isComicImageFileName(entity.name) &&
+          !isNamedComicCover(entity.name)) {
+        files.add(entity);
+      }
+    }
+    if (files.isEmpty) return const [];
+    files.sort((a, b) => compareComicFileNames(a.name, b.name));
+    return files.map((file) => 'file://${file.path}').toList();
+  }
+
+  /// Keeps at most [_archiveCacheMaxChapters] extracted chapters on disk
+  /// (besides [keepPath], the one just used), deleting the least-recently
+  /// touched ones first.
+  static Future<void> _evictArchiveCacheExcept(String keepPath) async {
+    final root = _archiveCacheRoot;
+    if (!await root.exists()) return;
+    try {
+      final others = <Directory>[];
+      await for (final entity in root.list()) {
+        if (entity is Directory && entity.path != keepPath) {
+          others.add(entity);
+        }
+      }
+      if (others.length <= _archiveCacheMaxChapters) return;
+      final withStat = [
+        for (final dir in others) (dir: dir, stat: await dir.stat()),
+      ]..sort((a, b) => b.stat.modified.compareTo(a.stat.modified));
+      for (final entry in withStat.skip(_archiveCacheMaxChapters)) {
+        await entry.dir.deleteIgnoreError(recursive: true);
+      }
+    } catch (e) {
+      Log.warning('WebDAV Library', 'Failed to evict cbz cache: $e');
     }
   }
 
@@ -721,6 +885,16 @@ class WebDavLibrarySource {
             .where((entry) => !_isIgnoredEntry(entry.name))
             .toList()
           ..sort((a, b) => compareComicFileNames(a.name, b.name));
+    // A chapter can also be a single archive file (e.g. one .cbz per
+    // chapter) instead of a directory of loose images; each is downloaded
+    // and extracted into a temporary cache on demand, see
+    // [_loadArchiveChapterPages].
+    final archiveEntries =
+        entries
+            .where((entry) => !entry.isDirectory)
+            .where((entry) => isComicArchiveFileName(entry.name))
+            .toList()
+          ..sort((a, b) => compareComicFileNames(a.name, b.name));
     final metadata = await _readMetadata(
       config,
       comicPath,
@@ -729,6 +903,7 @@ class WebDavLibrarySource {
     );
 
     final metadataChapters = <String, ComicChapter>{};
+    final archiveChapters = <String, WebDavLibraryEntry>{};
     final chapterMap = <String, String>{};
     if (metadata?.chapters?.isNotEmpty == true) {
       for (var index = 0; index < metadata!.chapters!.length; index++) {
@@ -740,6 +915,10 @@ class WebDavLibrarySource {
     } else {
       for (final directory in directories) {
         chapterMap[directory.name] = directory.name;
+      }
+      for (final archive in archiveEntries) {
+        chapterMap[archive.name] = archive.name;
+        archiveChapters[archive.name] = archive;
       }
       if (chapterMap.isEmpty && rootImages.isNotEmpty) {
         chapterMap[rootChapterId] = rootChapterTitle;
@@ -794,6 +973,7 @@ class WebDavLibrarySource {
       cover: coverPath ?? '',
       chapters: chapterMap,
       metadataChapters: metadataChapters,
+      archiveChapters: archiveChapters,
       rootImages: rootImages,
     );
   }
@@ -876,6 +1056,7 @@ class _WebDavComicSnapshot {
     required this.cover,
     required this.chapters,
     required this.metadataChapters,
+    required this.archiveChapters,
     required this.rootImages,
   });
 
@@ -885,11 +1066,26 @@ class _WebDavComicSnapshot {
   final String cover;
   final Map<String, String> chapters;
   final Map<String, ComicChapter> metadataChapters;
+  final Map<String, WebDavLibraryEntry> archiveChapters;
   final List<WebDavLibraryEntry> rootImages;
+
+  static WebDavLibraryEntry _entryFromJson(Map entry) => WebDavLibraryEntry(
+    name: entry['name'] as String,
+    isDirectory: false,
+    eTag: entry['eTag'] as String?,
+    modifiedAt: entry['modifiedAt'] as int?,
+  );
+
+  static Map<String, dynamic> _entryToJson(WebDavLibraryEntry entry) => {
+    'name': entry.name,
+    'eTag': entry.eTag,
+    'modifiedAt': entry.modifiedAt,
+  };
 
   factory _WebDavComicSnapshot.fromJson(Map<String, dynamic> json) {
     final chapters = json['chapters'];
     final metadataChapters = json['metadataChapters'];
+    final archiveChapters = json['archiveChapters'];
     final rootImages = json['rootImages'];
     return _WebDavComicSnapshot(
       title: json['title'] as String,
@@ -909,18 +1105,14 @@ class _WebDavComicSnapshot {
               ),
             )
           : const {},
+      archiveChapters: archiveChapters is Map
+          ? archiveChapters.map(
+              (key, value) =>
+                  MapEntry(key.toString(), _entryFromJson(value as Map)),
+            )
+          : const {},
       rootImages: rootImages is List
-          ? rootImages
-                .whereType<Map>()
-                .map(
-                  (entry) => WebDavLibraryEntry(
-                    name: entry['name'] as String,
-                    isDirectory: false,
-                    eTag: entry['eTag'] as String?,
-                    modifiedAt: entry['modifiedAt'] as int?,
-                  ),
-                )
-                .toList()
+          ? rootImages.whereType<Map>().map(_entryFromJson).toList()
           : const [],
     );
   }
@@ -935,14 +1127,10 @@ class _WebDavComicSnapshot {
     'metadataChapters': metadataChapters.map(
       (key, value) => MapEntry(key, value.toJson()),
     ),
-    'rootImages': [
-      for (final entry in rootImages)
-        {
-          'name': entry.name,
-          'eTag': entry.eTag,
-          'modifiedAt': entry.modifiedAt,
-        },
-    ],
+    'archiveChapters': archiveChapters.map(
+      (key, value) => MapEntry(key, _entryToJson(value)),
+    ),
+    'rootImages': [for (final entry in rootImages) _entryToJson(entry)],
   };
 
   List<String> get listTags => <String>{'WebDAV', ...tags}.toList();

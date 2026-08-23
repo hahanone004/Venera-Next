@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:venera_next/features/webdav_library/webdav_library.dart';
 import 'package:venera_next/features/webdav_library/webdav_library_cache.dart';
@@ -409,6 +410,141 @@ void main() {
     ]);
   });
 
+  group('archive-file chapters', () {
+    late Directory cacheDir;
+
+    setUp(() {
+      cacheDir = Directory.systemTemp.createTempSync(
+        'venera-webdav-library-cache-',
+      );
+      App.cachePath = cacheDir.path;
+    });
+
+    tearDown(() {
+      cacheDir.deleteSync(recursive: true);
+    });
+
+    List<int> buildZip(Map<String, List<int>> filesByName) {
+      final archive = Archive();
+      for (final entry in filesByName.entries) {
+        archive.addFile(
+          ArchiveFile(entry.key, entry.value.length, entry.value),
+        );
+      }
+      return ZipEncoder().encode(archive);
+    }
+
+    test(
+      'loadComicPages downloads and extracts a single-cbz chapter',
+      () async {
+        ops.dirs['/manga/'] = const [
+          WebDavLibraryEntry(name: 'Comic', isDirectory: true),
+        ];
+        ops.dirs['/manga/Comic/'] = const [
+          WebDavLibraryEntry(
+            name: 'Chapter1.cbz',
+            isDirectory: false,
+            eTag: 'etag-1',
+          ),
+        ];
+        ops.binaryFiles['/manga/Comic/Chapter1.cbz'] = buildZip({
+          '001.jpg': [1, 2, 3],
+          '002.jpg': [4, 5, 6],
+        });
+
+        final result = await WebDavLibrarySource.loadComicPages(
+          'Comic',
+          'Chapter1.cbz',
+        );
+
+        expect(result.success, isTrue);
+        expect(result.data, hasLength(2));
+        expect(result.data.every((path) => path.startsWith('file://')), isTrue);
+        expect(result.data[0], endsWith('001.jpg'));
+        expect(result.data[1], endsWith('002.jpg'));
+        final firstFile = File(result.data[0].replaceFirst('file://', ''));
+        expect(await firstFile.readAsBytes(), [1, 2, 3]);
+      },
+    );
+
+    test(
+      'loadComicPages reuses the extracted cache instead of downloading again',
+      () async {
+        ops.dirs['/manga/'] = const [
+          WebDavLibraryEntry(name: 'Comic', isDirectory: true),
+        ];
+        ops.dirs['/manga/Comic/'] = const [
+          WebDavLibraryEntry(
+            name: 'Chapter1.cbz',
+            isDirectory: false,
+            eTag: 'etag-1',
+          ),
+        ];
+        ops.binaryFiles['/manga/Comic/Chapter1.cbz'] = buildZip({
+          '001.jpg': [1, 2, 3],
+        });
+
+        final first = await WebDavLibrarySource.loadComicPages(
+          'Comic',
+          'Chapter1.cbz',
+        );
+        final second = await WebDavLibrarySource.loadComicPages(
+          'Comic',
+          'Chapter1.cbz',
+        );
+
+        expect(first.data, second.data);
+        expect(ops.binaryReadPaths, ['/manga/Comic/Chapter1.cbz']);
+      },
+    );
+
+    test(
+      'loadComicPages re-downloads once the remote eTag changes',
+      () async {
+        ops.dirs['/manga/'] = const [
+          WebDavLibraryEntry(name: 'Comic', isDirectory: true),
+        ];
+        ops.dirs['/manga/Comic/'] = const [
+          WebDavLibraryEntry(
+            name: 'Chapter1.cbz',
+            isDirectory: false,
+            eTag: 'etag-1',
+          ),
+        ];
+        ops.binaryFiles['/manga/Comic/Chapter1.cbz'] = buildZip({
+          '001.jpg': [1, 2, 3],
+        });
+        await WebDavLibrarySource.loadComicPages('Comic', 'Chapter1.cbz');
+
+        // Simulate the remote file changing: new eTag, new content.
+        WebDavLibrarySource.resetCacheForTesting();
+        ops.dirs['/manga/Comic/'] = const [
+          WebDavLibraryEntry(
+            name: 'Chapter1.cbz',
+            isDirectory: false,
+            eTag: 'etag-2',
+          ),
+        ];
+        ops.binaryFiles['/manga/Comic/Chapter1.cbz'] = buildZip({
+          '001.jpg': [9, 9, 9],
+        });
+
+        final result = await WebDavLibrarySource.loadComicPages(
+          'Comic',
+          'Chapter1.cbz',
+        );
+
+        expect(result.success, isTrue);
+        final file = File(result.data.single.replaceFirst('file://', ''));
+        expect(await file.readAsBytes(), [9, 9, 9]);
+        expect(ops.binaryReadPaths, [
+          '/manga/Comic/Chapter1.cbz',
+          '/manga/Comic/Chapter1.cbz',
+        ]);
+      },
+    );
+  });
+
   test(
     'CBZ metadata enriches list and details and maps virtual chapter pages',
     () async {
@@ -581,8 +717,10 @@ class _FakeWebDavLibraryOps implements WebDavLibraryOps {
   final dirs = <String, List<WebDavLibraryEntry>>{};
   final errors = <String, Object>{};
   final textFiles = <String, String>{};
+  final binaryFiles = <String, List<int>>{};
   final readPaths = <String>[];
   final textReadPaths = <String>[];
+  final binaryReadPaths = <String>[];
   final blockers = <String, Completer<void>>{};
 
   @override
@@ -602,6 +740,17 @@ class _FakeWebDavLibraryOps implements WebDavLibraryOps {
     textReadPaths.add(remotePath);
     final value = textFiles[remotePath];
     if (value == null) throw StateError('Missing text file: $remotePath');
+    return value;
+  }
+
+  @override
+  Future<List<int>> readBytes(
+    WebDavLibraryConfig config,
+    String remotePath,
+  ) async {
+    binaryReadPaths.add(remotePath);
+    final value = binaryFiles[remotePath];
+    if (value == null) throw StateError('Missing binary file: $remotePath');
     return value;
   }
 
