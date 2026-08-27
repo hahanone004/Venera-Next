@@ -420,7 +420,7 @@ class Settings with ChangeNotifier {
     'cropWhitespace': false,
     'whitespaceCropTolerance': 12,
     'readerNightMode': false,
-    'readerNightModeThreshold': 0.5, // 0.4 - 0.8
+    'readerNightModeBrightness': 0.25, // 0.1 - 0.6
   };
 
   operator [](String key) {

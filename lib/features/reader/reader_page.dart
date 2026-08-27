@@ -307,13 +307,13 @@ class ReaderState extends State<Reader>
       ) ==
       true;
 
-  double get _nightModeThreshold {
+  double get _nightModeBrightness {
     final value = appdata.settings.getReaderSetting(
       cid,
       type.sourceKey,
-      'readerNightModeThreshold',
+      'readerNightModeBrightness',
     );
-    return value is num ? value.toDouble() : kDefaultNightModeThreshold;
+    return value is num ? value.toDouble() : kDefaultNightModeBrightness;
   }
 
   @override
@@ -334,7 +334,7 @@ class ReaderState extends State<Reader>
                   // colors instead of being inverted along with the art.
                   child: NightModeFilter(
                     enabled: _nightModeEnabled,
-                    threshold: _nightModeThreshold,
+                    brightness: _nightModeBrightness,
                     child: ReaderImages(
                       key: Key(
                         mode.isWaterfall ? mode.key : chapter.toString(),

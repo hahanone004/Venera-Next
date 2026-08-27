@@ -467,7 +467,7 @@ class _ReaderSettingsState extends State<ReaderSettings> {
         ).toSliver(),
         SwitchSetting(
           title: 'Night mode'.tl,
-          subtitle: 'Darken bright pages while keeping colors'.tl,
+          subtitle: 'Dim pages without changing their colors'.tl,
           settingKey: 'readerNightMode',
           onChanged: () {
             setState(() {});
@@ -486,13 +486,13 @@ class _ReaderSettingsState extends State<ReaderSettings> {
               ) ==
               true,
           child: SliderSetting(
-            title: 'Night mode threshold'.tl,
-            settingsIndex: 'readerNightModeThreshold',
+            title: 'Night mode brightness'.tl,
+            settingsIndex: 'readerNightModeBrightness',
             interval: 0.05,
-            min: 0.4,
-            max: 0.8,
+            min: 0.1,
+            max: 0.6,
             onChanged: () {
-              widget.onChanged?.call('readerNightModeThreshold');
+              widget.onChanged?.call('readerNightModeBrightness');
             },
             comicId: isEnabledSpecificSettings ? widget.comicId : null,
             comicSource: isEnabledSpecificSettings ? widget.comicSource : null,

@@ -112,8 +112,6 @@ flutter:
     - assets/tags.json
     - assets/tags_tw.json
     - assets/opencc.txt
-  shaders:
-    - shaders/night_mode.frag
 # fonts:
 
 flutter_to_arch:
