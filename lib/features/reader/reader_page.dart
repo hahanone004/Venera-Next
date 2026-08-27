@@ -9,6 +9,7 @@ import 'package:venera_next/features/favorites/favorites.dart';
 import 'package:venera_next/features/history/history.dart';
 import 'package:venera_next/features/reader/gesture.dart';
 import 'package:venera_next/features/reader/images.dart';
+import 'package:venera_next/features/reader/night_mode.dart';
 import 'package:venera_next/features/reader/reading_session.dart';
 import 'package:venera_next/features/reader/scaffold.dart';
 import 'package:venera_next/features/reader/volume.dart';
@@ -298,6 +299,23 @@ class ReaderState extends State<Reader>
     }
   }
 
+  bool get _nightModeEnabled =>
+      appdata.settings.getReaderSetting(
+        cid,
+        type.sourceKey,
+        'readerNightMode',
+      ) ==
+      true;
+
+  double get _nightModeThreshold {
+    final value = appdata.settings.getReaderSetting(
+      cid,
+      type.sourceKey,
+      'readerNightModeThreshold',
+    );
+    return value is num ? value.toDouble() : kDefaultNightModeThreshold;
+  }
+
   @override
   Widget build(BuildContext context) {
     _checkImagesPerPageChange();
@@ -311,8 +329,17 @@ class ReaderState extends State<Reader>
             builder: (context) {
               return ReaderScaffold(
                 child: ReaderGestureDetector(
-                  child: ReaderImages(
-                    key: Key(mode.isWaterfall ? mode.key : chapter.toString()),
+                  // Wraps only the pages, so the reader's own chrome
+                  // (page number, status bar, buttons) keeps its normal
+                  // colors instead of being inverted along with the art.
+                  child: NightModeFilter(
+                    enabled: _nightModeEnabled,
+                    threshold: _nightModeThreshold,
+                    child: ReaderImages(
+                      key: Key(
+                        mode.isWaterfall ? mode.key : chapter.toString(),
+                      ),
+                    ),
                   ),
                 ),
               );

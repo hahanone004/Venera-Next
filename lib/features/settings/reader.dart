@@ -465,6 +465,40 @@ class _ReaderSettingsState extends State<ReaderSettings> {
           comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
           useDeviceSettings: useDeviceSpecificSettings,
         ).toSliver(),
+        SwitchSetting(
+          title: 'Night mode'.tl,
+          subtitle: 'Darken bright pages while keeping colors'.tl,
+          settingKey: 'readerNightMode',
+          onChanged: () {
+            setState(() {});
+            widget.onChanged?.call('readerNightMode');
+          },
+          comicId: isEnabledSpecificSettings ? widget.comicId : null,
+          comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
+          useDeviceSettings: useDeviceSpecificSettings,
+        ).toSliver(),
+        SliverAnimatedVisibility(
+          visible:
+              _readerSettingValue(
+                'readerNightMode',
+                isEnabledSpecificSettings: isEnabledSpecificSettings,
+                useDeviceSpecificSettings: useDeviceSpecificSettings,
+              ) ==
+              true,
+          child: SliderSetting(
+            title: 'Night mode threshold'.tl,
+            settingsIndex: 'readerNightModeThreshold',
+            interval: 0.05,
+            min: 0.4,
+            max: 0.8,
+            onChanged: () {
+              widget.onChanged?.call('readerNightModeThreshold');
+            },
+            comicId: isEnabledSpecificSettings ? widget.comicId : null,
+            comicSource: isEnabledSpecificSettings ? widget.comicSource : null,
+            useDeviceSettings: useDeviceSpecificSettings,
+          ),
+        ),
         SliverAnimatedVisibility(
           visible: _isVerticalFlowMode(
             isEnabledSpecificSettings: isEnabledSpecificSettings,
