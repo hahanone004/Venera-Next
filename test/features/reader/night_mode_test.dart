@@ -4,7 +4,7 @@ import 'package:venera_next/features/reader/night_mode.dart';
 void main() {
   group('nightModeDimPixel', () {
     test('dims a white page background without making it pure black', () {
-      expect(nightModeDimPixel(245, 245, 245), (61, 61, 61));
+      expect(nightModeDimPixel(245, 245, 245), (123, 123, 123));
     });
 
     test('leaves black black instead of flipping it to white', () {
@@ -31,7 +31,7 @@ void main() {
 
     test('scales channels evenly so hue is untouched', () {
       // A 3:2:1 channel ratio stays 3:2:1 after dimming.
-      expect(nightModeDimPixel(240, 160, 80), (60, 40, 20));
+      expect(nightModeDimPixel(240, 160, 80), (120, 80, 40));
     });
 
     test('a brightness of 1 leaves the page untouched', () {
@@ -39,23 +39,36 @@ void main() {
     });
 
     test('a lower brightness dims further', () {
-      expect(nightModeDimPixel(200, 200, 200, brightness: 0.1), (20, 20, 20));
-      expect(nightModeDimPixel(200, 200, 200, brightness: 0.6), (120, 120, 120));
+      expect(nightModeDimPixel(200, 200, 200, brightness: 0.3), (60, 60, 60));
+      expect(nightModeDimPixel(200, 200, 200, brightness: 0.9), (180, 180, 180));
+    });
+
+    test('the slider range stays clear of both black and no-op', () {
+      expect(kMinNightModeBrightness, greaterThan(0.0));
+      expect(kMaxNightModeBrightness, lessThan(1.0));
+      expect(
+        kDefaultNightModeBrightness,
+        greaterThanOrEqualTo(kMinNightModeBrightness),
+      );
+      expect(
+        kDefaultNightModeBrightness,
+        lessThanOrEqualTo(kMaxNightModeBrightness),
+      );
     });
   });
 
   group('nightModeColorMatrix', () {
     test('is a plain channel scale that passes alpha through', () {
-      expect(nightModeColorMatrix(0.25), [
-        0.25, 0, 0, 0, 0, //
-        0, 0.25, 0, 0, 0, //
-        0, 0, 0.25, 0, 0, //
+      expect(nightModeColorMatrix(0.5), [
+        0.5, 0, 0, 0, 0, //
+        0, 0.5, 0, 0, 0, //
+        0, 0, 0.5, 0, 0, //
         0, 0, 0, 1, 0, //
       ]);
     });
 
     test('agrees with the per-pixel reference implementation', () {
-      const brightness = 0.25;
+      const brightness = 0.5;
       final matrix = nightModeColorMatrix(brightness);
       for (final value in [0, 20, 128, 200, 245, 255]) {
         final viaMatrix = (value * matrix[0]).round();

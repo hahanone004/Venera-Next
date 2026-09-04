@@ -2,7 +2,14 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 /// Default multiplier applied to each channel in night mode.
-const kDefaultNightModeBrightness = 0.25;
+const kDefaultNightModeBrightness = 0.5;
+
+/// Bounds offered by the brightness slider. The floor stays well clear of
+/// zero: below roughly a third of the original brightness a typical page's
+/// paper drops under the ambient glow of the screen itself and the artwork
+/// stops being readable rather than merely dim.
+const kMinNightModeBrightness = 0.3;
+const kMaxNightModeBrightness = 0.9;
 
 /// Reference implementation of the night-mode transform, in plain Dart, so
 /// the math has unit-test coverage independent of how it is rendered.

@@ -436,7 +436,10 @@ class _SliderSettingState extends State<SliderSetting> {
                 : widget.useDeviceSettings
                 ? appdata.settings.getDeviceReaderSetting(widget.settingsIndex)
                 : appdata.settings[widget.settingsIndex])
-            .toDouble();
+            .toDouble()
+            // A value saved before the range was last changed may now sit
+            // outside it, which Slider asserts on.
+            .clamp(widget.min, widget.max);
     return ListTile(
       title: Text(widget.title, softWrap: true, maxLines: 2),
       trailing: Text(

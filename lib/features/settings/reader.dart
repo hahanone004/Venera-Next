@@ -3,6 +3,7 @@ import 'package:venera_next/components/appbar.dart';
 import 'package:venera_next/components/code.dart';
 import 'package:venera_next/components/layout.dart';
 import 'package:venera_next/components/scroll.dart';
+import 'package:venera_next/features/reader/night_mode.dart';
 import 'package:venera_next/features/settings/setting_components.dart';
 import 'package:venera_next/foundation/app.dart';
 import 'package:venera_next/foundation/appdata.dart';
@@ -489,8 +490,8 @@ class _ReaderSettingsState extends State<ReaderSettings> {
             title: 'Night mode brightness'.tl,
             settingsIndex: 'readerNightModeBrightness',
             interval: 0.05,
-            min: 0.1,
-            max: 0.6,
+            min: kMinNightModeBrightness,
+            max: kMaxNightModeBrightness,
             onChanged: () {
               widget.onChanged?.call('readerNightModeBrightness');
             },

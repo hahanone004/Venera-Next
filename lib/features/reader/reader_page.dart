@@ -313,7 +313,11 @@ class ReaderState extends State<Reader>
       type.sourceKey,
       'readerNightModeBrightness',
     );
-    return value is num ? value.toDouble() : kDefaultNightModeBrightness;
+    if (value is! num) return kDefaultNightModeBrightness;
+    return value.toDouble().clamp(
+      kMinNightModeBrightness,
+      kMaxNightModeBrightness,
+    );
   }
 
   @override
